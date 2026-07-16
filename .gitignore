@@ -1,0 +1,25 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments
+.venv/
+venv/
+*.log
+
+# Generated experiment data and figures
+outputs/
+data_snapshot/
+artifacts_snapshot/
+figures/
+figures_png_pdf/
+figures_matplotlib/
+specnet_agent_experiments/results*/
+
+# Local editor files
+.vscode/
+.idea/
+*.swp
