@@ -18,6 +18,7 @@ figures/
 figures_png_pdf/
 figures_matplotlib/
 specnet_agent_experiments/results*/
+specnet_agent_experiments/test_artifacts/
 
 # Local editor files
 .vscode/

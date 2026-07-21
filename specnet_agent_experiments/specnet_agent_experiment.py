@@ -128,6 +128,19 @@ LOAD_CONFIG = {
     "heavy": {"mean_interarrival": 24.0, "burst_probability": 0.20, "capacity": 16.0},
 }
 
+NETWORK_MODELS = ("single_bottleneck", "service_paths")
+SERVICE_PATH_BY_TYPE = {
+    "planner": "control",
+    "judge": "control",
+    "retrieval": "data",
+    "tool": "data",
+    "storage": "data",
+    "background": "data",
+    "llm": "model",
+}
+SERVICE_PATH_ORDER = ("control", "data", "model")
+SERVICE_PATH_CAPACITY = 16.0
+
 
 @dataclass
 class BranchSpec:
@@ -165,6 +178,7 @@ class Flow:
     completed_at: Optional[int] = None
     cancelled: bool = False
     served: float = 0.0
+    path_id: str = "shared"
 
 
 @dataclass
@@ -579,11 +593,19 @@ class Simulator:
         quality_weight: float = 1.60,
         slack_queue_basis: str = DEFAULT_SLACK_QUEUE_BASIS,
         slack_queue_weight: float = DEFAULT_SLACK_QUEUE_WEIGHT,
+        network_model: str = "single_bottleneck",
+        single_bottleneck_capacity: Optional[float] = None,
     ) -> None:
         if slack_queue_basis not in SLACK_QUEUE_BASES:
             raise ValueError(f"unknown Slack queue basis: {slack_queue_basis}")
         if slack_queue_weight < 0.0:
             raise ValueError("Slack queue weight must be non-negative")
+        if network_model not in NETWORK_MODELS:
+            raise ValueError(f"unknown network model: {network_model}")
+        if single_bottleneck_capacity is not None and single_bottleneck_capacity <= 0.0:
+            raise ValueError("single-bottleneck capacity must be positive")
+        if network_model != "single_bottleneck" and single_bottleneck_capacity is not None:
+            raise ValueError("single-bottleneck capacity only applies to single_bottleneck")
         self.specs = list(specs)
         self.policy = policy
         self.load = load
@@ -593,7 +615,17 @@ class Simulator:
         self.quality_weight = quality_weight
         self.slack_queue_basis = slack_queue_basis
         self.slack_queue_weight = slack_queue_weight
-        self.capacity = LOAD_CONFIG[load]["capacity"]
+        self.network_model = network_model
+        self.capacity = (
+            single_bottleneck_capacity
+            if single_bottleneck_capacity is not None
+            else LOAD_CONFIG[load]["capacity"]
+        )
+        self.path_capacities = (
+            {"shared": self.capacity}
+            if network_model == "single_bottleneck"
+            else {path_id: SERVICE_PATH_CAPACITY for path_id in SERVICE_PATH_ORDER}
+        )
         self.time = 0
         self.next_flow_id = 0
         self.flows: Dict[int, Flow] = {}
@@ -604,6 +636,23 @@ class Simulator:
         self.total_capacity = 0.0
         self.total_served = 0.0
         self.queue_pressure_samples: List[float] = []
+        self.path_total_capacity: Dict[str, float] = {
+            path_id: 0.0 for path_id in self.path_capacities
+        }
+        self.path_total_served: Dict[str, float] = {
+            path_id: 0.0 for path_id in self.path_capacities
+        }
+        self.path_queue_pressure_samples: Dict[str, List[float]] = {
+            path_id: [] for path_id in self.path_capacities
+        }
+
+    def path_for_service_type(self, service_type: str) -> str:
+        if self.network_model == "single_bottleneck":
+            return "shared"
+        try:
+            return SERVICE_PATH_BY_TYPE[service_type]
+        except KeyError as exc:
+            raise ValueError(f"unknown service type for service_paths: {service_type}") from exc
 
     def new_flow(
         self,
@@ -628,6 +677,7 @@ class Simulator:
             speculative=speculative,
             background=background,
             created_at=self.time,
+            path_id=self.path_for_service_type(service_type),
         )
         self.flows[flow.flow_id] = flow
         self.next_flow_id += 1
@@ -894,20 +944,12 @@ class Simulator:
         self.completed_workflows.append(workflow)
         self.policy.on_workflow_complete(workflow, self)
 
-    def serve_active_flows(self) -> None:
-        capacity = self.capacity
-        active = self.active_flows()
-        self.total_capacity += capacity
-        if not active:
-            return
-
-        pressure = sum(flow.remaining for flow in active) / max(1.0, capacity)
-        self.queue_pressure_samples.append(pressure)
-
+    def serve_capacity_pool(self, active: List[Flow], capacity: float) -> float:
         # Weighted max-min style allocation. It avoids wasting capacity when
         # small flows finish during the epoch.
         remaining_capacity = capacity
         candidates = list(active)
+        total_served = 0.0
         while candidates and remaining_capacity > 1e-9:
             weighted = [(flow, max(0.0, self.policy.flow_weight(flow, self))) for flow in candidates]
             total_weight = sum(weight for _, weight in weighted)
@@ -927,6 +969,7 @@ class Simulator:
                 flow.served += served
                 self.total_served += served
                 served_this_round += served
+                total_served += served
                 progressed.append(flow)
             for flow in candidates:
                 if flow.remaining <= 1e-9 and flow.completed_at is None:
@@ -937,6 +980,30 @@ class Simulator:
             if served_this_round <= 1e-12 or not progressed:
                 break
             candidates = next_candidates
+        return total_served
+
+    def serve_active_flows(self) -> None:
+        active = self.active_flows()
+        epoch_capacity = sum(self.path_capacities.values())
+        self.total_capacity += epoch_capacity
+        for path_id, capacity in self.path_capacities.items():
+            self.path_total_capacity[path_id] += capacity
+        if not active:
+            return
+
+        # Keep this global pressure definition unchanged for Controller and
+        # historical avg_queue_pressure compatibility.
+        pressure = sum(flow.remaining for flow in active) / max(1.0, self.capacity)
+        self.queue_pressure_samples.append(pressure)
+
+        for path_id, capacity in self.path_capacities.items():
+            path_active = [flow for flow in active if flow.path_id == path_id]
+            if not path_active:
+                continue
+            path_pressure = sum(flow.remaining for flow in path_active) / max(1.0, capacity)
+            self.path_queue_pressure_samples[path_id].append(path_pressure)
+            served = self.serve_capacity_pool(path_active, capacity)
+            self.path_total_served[path_id] += served
 
     def workflow_reward(self, workflow: WorkflowRuntime) -> float:
         if workflow.complete_time is None:
@@ -1062,6 +1129,21 @@ class Simulator:
         total_wasted = sum(row["wasted_speculative_bytes"] for row in records)
         total_bg = sum(row["background_bytes_served"] for row in records)
         avg_quality = sum(row["quality"] for row in records) / max(1, completed)
+        path_records = [
+            {
+                "network_model": self.network_model,
+                "path_id": path_id,
+                "capacity": capacity,
+                "total_served": self.path_total_served[path_id],
+                "total_capacity": self.path_total_capacity[path_id],
+                "utilization": self.path_total_served[path_id]
+                / max(1.0, self.path_total_capacity[path_id]),
+                "avg_queue_pressure": statistics.mean(self.path_queue_pressure_samples[path_id])
+                if self.path_queue_pressure_samples[path_id]
+                else 0.0,
+            }
+            for path_id, capacity in self.path_capacities.items()
+        ]
         return {
             "policy": self.policy.name,
             "load": self.load,
@@ -1080,6 +1162,7 @@ class Simulator:
             "avg_queue_pressure": statistics.mean(self.queue_pressure_samples) if self.queue_pressure_samples else 0.0,
             "action_counts": dict(self.policy.action_counter),
             "workflow_records": records,
+            "path_records": path_records,
         }
 
 
@@ -1256,6 +1339,8 @@ def evaluate_training_checkpoint(
     max_time: int,
     validation_seed: int,
     validation_runs: int,
+    network_model: str = "single_bottleneck",
+    single_bottleneck_capacity: Optional[float] = None,
 ) -> Dict[str, object]:
     by_load: Dict[str, List[Dict[str, float]]] = defaultdict(list)
     run_rewards: List[float] = []
@@ -1274,6 +1359,8 @@ def evaluate_training_checkpoint(
                 quality_weight=source.quality_weight,
                 slack_queue_basis=source.slack_queue_basis,
                 slack_queue_weight=source.slack_queue_weight,
+                network_model=network_model,
+                single_bottleneck_capacity=single_bottleneck_capacity,
             )
             summary = sim.run()
             rewards = [sim.workflow_reward(workflow) for workflow in sim.completed_workflows]
@@ -1328,6 +1415,8 @@ def train_specnet_agent(
     checkpoint_eval_runs: int = 5,
     slack_queue_basis: str = DEFAULT_SLACK_QUEUE_BASIS,
     slack_queue_weight: float = DEFAULT_SLACK_QUEUE_WEIGHT,
+    network_model: str = "single_bottleneck",
+    single_bottleneck_capacity: Optional[float] = None,
 ) -> SpecNetAgentBanditPolicy:
     if episodes <= 0:
         raise ValueError("training episodes must be positive")
@@ -1335,6 +1424,8 @@ def train_specnet_agent(
         raise ValueError(f"unknown checkpoint selection: {checkpoint_selection}")
     if checkpoint_eval_runs <= 0:
         raise ValueError("checkpoint evaluation runs must be positive")
+    if network_model not in NETWORK_MODELS:
+        raise ValueError(f"unknown network model: {network_model}")
     policy = SpecNetAgentBanditPolicy(
         seed=seed,
         train=True,
@@ -1371,6 +1462,8 @@ def train_specnet_agent(
             quality_weight=quality_weight,
             slack_queue_basis=slack_queue_basis,
             slack_queue_weight=slack_queue_weight,
+            network_model=network_model,
+            single_bottleneck_capacity=single_bottleneck_capacity,
         )
         training_window.append(sim.run())
         episode_number = episode + 1
@@ -1404,6 +1497,8 @@ def train_specnet_agent(
                 max_time,
                 validation_seed,
                 checkpoint_eval_runs,
+                network_model,
+                single_bottleneck_capacity,
             )
         selected_record = max(
             policy.training_checkpoints,
@@ -1599,6 +1694,18 @@ def parse_args() -> argparse.Namespace:
         default="light,medium,heavy",
         help="Comma-separated loads to evaluate: light,medium,heavy.",
     )
+    parser.add_argument(
+        "--network-model",
+        choices=NETWORK_MODELS,
+        default="single_bottleneck",
+        help="Network capacity model: one shared bottleneck or three service-specific paths.",
+    )
+    parser.add_argument(
+        "--single-bottleneck-capacity",
+        type=float,
+        default=None,
+        help="Optional shared-link capacity override for single_bottleneck only (default: 16).",
+    )
     return parser.parse_args()
 
 
@@ -1619,6 +1726,13 @@ def main() -> None:
         raise SystemExit(f"Invalid loads: {invalid_loads}")
     if args.slack_queue_weight < 0.0:
         raise SystemExit("--slack-queue-weight must be non-negative")
+    if args.single_bottleneck_capacity is not None:
+        if args.single_bottleneck_capacity <= 0.0:
+            raise SystemExit("--single-bottleneck-capacity must be positive")
+        if args.network_model != "single_bottleneck":
+            raise SystemExit(
+                "--single-bottleneck-capacity only applies to --network-model single_bottleneck"
+            )
 
     os.makedirs(args.output_dir, exist_ok=True)
     trained_policies: Dict[str, Tuple[float, int, str, SpecNetAgentBanditPolicy]] = {}
@@ -1657,6 +1771,8 @@ def main() -> None:
                     checkpoint_eval_runs=args.checkpoint_eval_runs,
                     slack_queue_basis=args.slack_queue_basis,
                     slack_queue_weight=args.slack_queue_weight,
+                    network_model=args.network_model,
+                    single_bottleneck_capacity=args.single_bottleneck_capacity,
                 )
                 state_features = ",".join(CONTROLLER_VARIANT_FEATURES[controller_variant])
                 training_info = {
@@ -1710,6 +1826,7 @@ def main() -> None:
     summaries: List[Dict[str, object]] = []
     workflow_rows: List[Dict[str, object]] = []
     action_rows: List[Dict[str, object]] = []
+    path_rows: List[Dict[str, object]] = []
 
     for load in loads:
         for run_index in range(args.eval_runs):
@@ -1737,6 +1854,8 @@ def main() -> None:
                     quality_weight=float(quality_weight) if quality_weight != "" else args.quality_weight,
                     slack_queue_basis=args.slack_queue_basis,
                     slack_queue_weight=args.slack_queue_weight,
+                    network_model=args.network_model,
+                    single_bottleneck_capacity=args.single_bottleneck_capacity,
                 )
                 summary = sim.run()
                 summary["policy"] = policy_name
@@ -1748,7 +1867,13 @@ def main() -> None:
                 summary["train_seed"] = train_seed
                 summary["eval_seed"] = eval_seed
                 summary["run"] = run_index
-                summaries.append({k: v for k, v in summary.items() if k not in ("workflow_records", "action_counts")})
+                summaries.append(
+                    {
+                        k: v
+                        for k, v in summary.items()
+                        if k not in ("workflow_records", "action_counts", "path_records")
+                    }
+                )
                 for row in summary["workflow_records"]:
                     row_with_context = dict(row)
                     row_with_context.update(
@@ -1784,6 +1909,22 @@ def main() -> None:
                             "count": count,
                         }
                     )
+                for path_record in summary["path_records"]:
+                    path_row = {
+                        "load": load,
+                        "policy": policy_name,
+                        "controller_variant": controller_variant,
+                        "state_features": state_features,
+                        "quality_weight": quality_weight,
+                        "slack_queue_basis": args.slack_queue_basis,
+                        "slack_queue_weight": args.slack_queue_weight,
+                        "train_seed": train_seed,
+                        "eval_seed": eval_seed,
+                        "run": run_index,
+                        "seed": workload_seed,
+                    }
+                    path_row.update(path_record)
+                    path_rows.append(path_row)
 
     aggregate_rows = aggregate_summaries(summaries)
     write_csv(os.path.join(args.output_dir, "summary_by_run.csv"), summaries)
@@ -1791,9 +1932,16 @@ def main() -> None:
     write_csv(os.path.join(args.output_dir, "workflow_results.csv"), workflow_rows)
     write_csv(os.path.join(args.output_dir, "action_counts.csv"), action_rows)
     write_csv(os.path.join(args.output_dir, "trained_agents.csv"), trained_agent_rows)
+    write_csv(os.path.join(args.output_dir, "path_results.csv"), path_rows)
     write_json(
         os.path.join(args.output_dir, "specnet_agent_model.json"),
         {
+            "network_model": args.network_model,
+            "path_capacities": (
+                {"shared": args.single_bottleneck_capacity or LOAD_CONFIG[loads[0]]["capacity"]}
+                if args.network_model == "single_bottleneck"
+                else {path_id: SERVICE_PATH_CAPACITY for path_id in SERVICE_PATH_ORDER}
+            ),
             "slack_estimator": SLACK_ESTIMATORS[args.slack_queue_basis],
             "slack_queue_basis": args.slack_queue_basis,
             "slack_queue_weight": args.slack_queue_weight,

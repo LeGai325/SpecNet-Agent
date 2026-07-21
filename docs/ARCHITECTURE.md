@@ -65,6 +65,18 @@ recovery
 当前 `Simulator.serve_active_flows()` 使用 weighted max-min 风格的容量分配。
 `Policy.flow_weight()` 返回的权重只是 QoS proxy，不是真实硬件队列。
 
+Simulator 支持两个网络模型：
+
+- `single_bottleneck`：默认模型，所有 flow 共享一条容量为 16 的 `shared` 路径。
+- `service_paths`：`planner/judge -> control`、
+  `retrieval/tool/storage/background -> data`、`llm -> model`，三条路径容量均为 16。
+
+多路径模式在每条路径内独立执行同一套 weighted max-min 分配。它不模拟 source、
+destination、逐跳链路、共享核心或 ECMP。`Flow.path_id` 仅表示逻辑容量池。
+
+当前多路径实现有意只修改调度。congestion、Slack、speculative pressure 和 background
+pressure 仍从全部 active flow 计算；path-aware Controller state 留作后续独立工作。
+
 合并真实 QoS 时，建议：
 
 1. 保留现有 weighted allocation 作为 baseline。
@@ -100,14 +112,19 @@ workflow_results.csv
 action_counts.csv
 trained_agents.csv
 specnet_agent_model.json
+path_results.csv
 ```
 
-分析脚本位于 `specnet_plotting/`。所有生成文件放在 `outputs/`，不进入 Git。
+`path_results.csv` 记录逐路径容量、served、利用率和平均队列压力。历史
+`link_utilization` 在多路径模式下使用所有路径的总 served/总容量；`avg_queue_pressure`
+仍保留原来的全局 active bytes/16 口径。分析脚本位于 `specnet_plotting/`。所有生成文件
+放在 `outputs/`，不进入 Git。
 
 ## 测试边界
 
 - `test_slack_estimation.py`：Slack 公式、queue diagnostics 和配置回归。
 - `test_training_stability.py`：训练 schedule、checkpoint 和 validation 配置。
 - `test_slack_calibration.py`：离线 calibration 分组和 role-aware 估算。
+- `test_multi_path.py`：路径映射、容量隔离、调度权重、默认兼容性和输出契约。
 
 新增模块至少应包含一个针对新行为的测试，以及一个确认旧默认行为不变的回归测试。

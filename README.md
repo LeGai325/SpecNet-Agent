@@ -60,6 +60,39 @@ python3 specnet_agent_experiments/specnet_agent_experiment.py \
 
 生成的实验输出默认不会进入 Git。
 
+## 简化多路径模型
+
+默认网络模型仍是所有 flow 共享 16 单位容量的单瓶颈：
+
+```text
+--network-model single_bottleneck
+```
+
+可选的服务分路径模型把 flow 确定性映射到三条容量均为 16 的独立逻辑路径：
+
+```text
+control: planner, judge
+data:    retrieval, tool, storage, background
+model:   llm
+```
+
+启用方式：
+
+```bash
+python3 specnet_agent_experiments/specnet_agent_experiment.py \
+  --network-model service_paths \
+  --output-dir outputs/service_paths_smoke \
+  --train-episodes 3 \
+  --eval-runs 1 \
+  --duration 800 \
+  --max-workflows 30 \
+  --max-time 2500
+```
+
+该模式只改变容量分配：Controller 的 congestion、Slack 和 speculative pressure 仍按
+全局 active flow 聚合。三条路径的总理论容量为 48，因此它与单瓶颈模式的差异同时包含
+路径隔离和额外并行容量，不能解释为纯调度收益。逐路径统计写入 `path_results.csv`。
+
 ## Controller 状态消融
 
 当前 learned Controller 支持四种状态配置：
@@ -109,6 +142,7 @@ V2.1 改善了离线估计误差，但在 3-seed 运行时预实验中没有稳�
 - `no_source_control` 当前由 `critical_path_only` 代理，不是严格的单开关消融。
 - `no_learning` 当前由 `rule_balanced` 代理。
 - Queue priority 目前通过模拟器中的 weighted allocation 实现，不是真实 Q0-Q3 队列。
+- `service_paths` 是服务类型级逻辑路径，不是逐跳拓扑或 ECMP；Controller 状态仍是全局聚合。
 - 完整实验输出和个人过程报告保存在 Git 之外。
 
 修改 Controller 语义前，请先阅读：
