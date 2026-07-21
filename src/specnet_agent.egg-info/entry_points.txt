@@ -1,0 +1,6 @@
+[console_scripts]
+specnet-analyze-slack = specnet_agent.analysis.slack_calibration:main
+specnet-analyze-training = specnet_agent.analysis.training_stability:main
+specnet-export-workloads = specnet_agent.cli.export_workloads:main
+specnet-plot-all = specnet_agent.analysis.plot_all:main
+specnet-run = specnet_agent.cli.experiment:main

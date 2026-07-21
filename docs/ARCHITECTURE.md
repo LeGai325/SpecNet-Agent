@@ -2,14 +2,24 @@
 
 ## 当前形态
 
-项目目前以一个主实验脚本作为集成入口：
+项目采用 `src` package 结构，历史脚本保留为薄兼容包装：
 
 ```text
-specnet_agent_experiments/specnet_agent_experiment.py
+src/specnet_agent/
+├── config.py
+├── models.py
+├── workload.py
+├── policies/
+├── simulator.py
+├── training.py
+├── outputs.py
+├── cli/
+└── analysis/
 ```
 
-为了减少多人合并冲突，现阶段不建议在合并 QoS、源端控制等功能的同时拆分整个脚本。
-模块合并稳定后，可以再单独进行 package 化重构。
+依赖方向固定为：配置/模型 → workload/策略 → simulator → training/orchestration → analysis。
+核心模块不得反向依赖 CLI 或绘图模块。`specnet_agent_experiments/`、
+`specnet_plotting/` 和 `tools/` 只负责保持历史命令兼容。
 
 ## 工作流模型
 
@@ -102,7 +112,9 @@ trained_agents.csv
 specnet_agent_model.json
 ```
 
-分析脚本位于 `specnet_plotting/`。所有生成文件放在 `outputs/`，不进入 Git。
+实现位于 `specnet_agent.analysis`，`specnet_plotting/` 是历史路径包装。实验还会额外写入
+`run_manifest.json`，记录解析后的配置、代码版本、seed 矩阵和输出清单；六类历史输出及
+schema 不变。所有生成文件放在 `outputs/`，不进入 Git。
 
 ## 测试边界
 
@@ -110,4 +122,6 @@ specnet_agent_model.json
 - `test_training_stability.py`：训练 schedule、checkpoint 和 validation 配置。
 - `test_slack_calibration.py`：离线 calibration 分组和 role-aware 估算。
 
-新增模块至少应包含一个针对新行为的测试，以及一个确认旧默认行为不变的回归测试。
+标准测试位于 `tests/unit` 与 `tests/integration`，确定性基线位于 `tests/fixtures`。
+历史 unittest discovery 命令由兼容测试包装继续支持。新增模块至少应包含一个针对新行为
+的测试，以及一个确认旧默认行为不变的回归测试。

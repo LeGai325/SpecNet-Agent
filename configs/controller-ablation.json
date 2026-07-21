@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "output_dir": "outputs/controller_ablation",
+  "train_seeds": "11,23,37",
+  "train_episodes": 90,
+  "checkpoint_selection": "best_validation",
+  "eval_runs": 5,
+  "controller_variants": "full,congestion_only,no_slack,no_spec_pressure",
+  "loads": "light,medium,heavy"
+}

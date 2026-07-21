@@ -1,49 +1,16 @@
 #!/usr/bin/env python3
-"""Run all SpecNet-Agent plotting scripts."""
+"""Backward-compatible wrapper for specnet_agent.analysis.plot_all."""
 
 from __future__ import annotations
 
-import argparse
-import os
-import subprocess
 import sys
+from pathlib import Path
 
-from plot_common import add_common_args
+SRC = Path(__file__).resolve().parents[1] / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
-
-SCRIPTS = [
-    "plot_p99_latency.py",
-    "plot_deadline_miss.py",
-    "plot_wasted_speculative_bytes.py",
-    "plot_quality_tradeoff.py",
-    "plot_action_mix.py",
-    "plot_latency_cdf.py",
-    "plot_template_breakdown.py",
-]
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate all SpecNet-Agent PNG/PDF figures.")
-    add_common_args(parser)
-    parser.add_argument("--load", default="heavy", choices=["light", "medium", "heavy"])
-    args = parser.parse_args()
-
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    for script in SCRIPTS:
-        cmd = [
-            sys.executable,
-            os.path.join(script_dir, script),
-            "--input-dir",
-            args.input_dir,
-            "--output-dir",
-            args.output_dir,
-            "--dpi",
-            str(args.dpi),
-        ]
-        if script in {"plot_quality_tradeoff.py", "plot_latency_cdf.py", "plot_template_breakdown.py"}:
-            cmd.extend(["--load", args.load])
-        print("Running:", " ".join(cmd))
-        subprocess.check_call(cmd)
+from specnet_agent.analysis.plot_all import *  # noqa: F401,F403,E402
 
 
 if __name__ == "__main__":

@@ -1,0 +1,6 @@
+
+[dev]
+ruff>=0.6
+
+[plot]
+matplotlib>=3.7

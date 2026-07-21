@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "output_dir": "outputs/smoke",
+  "seed": 7,
+  "train_episodes": 3,
+  "eval_runs": 1,
+  "duration": 800,
+  "max_workflows": 30,
+  "max_time": 2500,
+  "quality_weight": 1.6,
+  "controller_variants": "full,no_slack",
+  "loads": "light,medium,heavy"
+}

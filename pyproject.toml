@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "specnet-agent"
+version = "0.1.0"
+description = "Research framework for network-aware speculation control in agent workflows"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+plot = ["matplotlib>=3.7"]
+dev = ["ruff>=0.6"]
+
+[project.scripts]
+specnet-run = "specnet_agent.cli.experiment:main"
+specnet-export-workloads = "specnet_agent.cli.export_workloads:main"
+specnet-plot-all = "specnet_agent.analysis.plot_all:main"
+specnet-analyze-slack = "specnet_agent.analysis.slack_calibration:main"
+specnet-analyze-training = "specnet_agent.analysis.training_stability:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+exclude = ["specnet_agent_experiments", "specnet_plotting", "tools"]
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]

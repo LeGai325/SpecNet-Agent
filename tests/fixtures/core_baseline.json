@@ -1,0 +1,30 @@
+{
+  "seed": 123,
+  "load": "light",
+  "duration": 300,
+  "max_workflows": 2,
+  "workflow_count": 2,
+  "first_workflow": {
+    "arrival_time": 2,
+    "template": "coding",
+    "deadline": 336.1346932162829,
+    "planner_size": 2.0,
+    "llm_size": 44.469781162019565,
+    "judge_size": 10.951516080769718,
+    "first_branch_service_type": "tool",
+    "first_branch_size": 11.20117623137389,
+    "first_branch_required": true
+  },
+  "critical_path_summary": {
+    "completed": 2,
+    "mean_latency": 13,
+    "p95_latency": 16.599999999999998,
+    "p99_latency": 16.919999999999998,
+    "deadline_miss_ratio": 0.0,
+    "wasted_speculative_bytes_per_workflow": 64.29588965483224,
+    "background_bytes_served_per_workflow": 17.06745416716222,
+    "avg_quality": 1.0,
+    "link_utilization": 0.25990099009900963,
+    "avg_queue_pressure": 19.926616659175625
+  }
+}

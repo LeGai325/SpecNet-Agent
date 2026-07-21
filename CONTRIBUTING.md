@@ -21,9 +21,12 @@ docs/reproducibility
 运行：
 
 ```bash
+python3 -m pip install -e ".[plot,dev]"
+python3 -m ruff check src tests
+python3 -m unittest discover -s tests -p 'test_*.py'
 python3 -m unittest discover -s specnet_agent_experiments -p 'test_*.py'
 python3 -m unittest discover -s specnet_plotting -p 'test_*.py'
-python3 -m compileall -q specnet_agent_experiments specnet_plotting tools
+python3 -m compileall -q src specnet_agent_experiments specnet_plotting tools tests
 ```
 
 如果修改了 Controller，还应运行一次小型 smoke 实验，并在 PR 中写清楚：
@@ -52,9 +55,8 @@ python3 -m compileall -q specnet_agent_experiments specnet_plotting tools
 
 ## 修改主模拟器时的注意事项
 
-`specnet_agent_experiment.py` 当前仍是多个模块共用的集成入口。QoS、源端控制、
-speculative pressure、reward 和 Controller state 都可能修改这个文件，因此进行较大重构前
-应先和其他开发者沟通，避免产生难以合并的冲突。
+核心实现位于 `src/specnet_agent/`。不要把实现重新放入历史包装脚本；新增依赖应遵循
+配置/模型 → workload/策略 → simulator → training/orchestration → analysis 的方向。
 
 新行为应尽量做成可配置选项，并在可能的情况下保持默认行为不变。同时添加针对新路径
 和向后兼容性的测试。

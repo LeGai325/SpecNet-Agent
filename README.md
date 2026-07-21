@@ -13,17 +13,20 @@
 ## 目录结构
 
 ```text
-specnet_agent_experiments/   主模拟器、Controller 和相关测试
-specnet_plotting/            实验分析与绘图脚本
-tools/                       实验复现辅助工具
-docs/                        简明架构和当前集成状态
-.github/workflows/           Pull Request 自动检查
+src/specnet_agent/           可安装的核心 package、CLI 与分析模块
+configs/                     default、smoke 与 controller ablation 配置
+tests/                       单元、集成与确定性回归 fixture
+specnet_agent_experiments/   历史实验入口兼容包装
+specnet_plotting/            历史分析入口兼容包装
+tools/                       历史工具入口兼容包装
+docs/                        架构、状态与实验复现说明
 ```
 
-主实验入口：
+推荐入口是 `specnet-run`；原实验路径继续兼容：
 
-```text
-specnet_agent_experiments/specnet_agent_experiment.py
+```bash
+specnet-run --config configs/smoke.json
+python specnet_agent_experiments/specnet_agent_experiment.py --config configs/smoke.json
 ```
 
 ## 快速开始
@@ -33,12 +36,13 @@ specnet_agent_experiments/specnet_agent_experiment.py
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python3 -m pip install -r specnet_plotting/requirements.txt
+python3 -m pip install -e ".[plot,dev]"
 ```
 
 运行测试：
 
 ```bash
+python3 -m unittest discover -s tests -p 'test_*.py'
 python3 -m unittest discover -s specnet_agent_experiments -p 'test_*.py'
 python3 -m unittest discover -s specnet_plotting -p 'test_*.py'
 ```
@@ -46,19 +50,21 @@ python3 -m unittest discover -s specnet_plotting -p 'test_*.py'
 运行小型 smoke 实验：
 
 ```bash
-python3 specnet_agent_experiments/specnet_agent_experiment.py \
-  --output-dir outputs/smoke \
-  --train-episodes 3 \
-  --eval-runs 1 \
-  --duration 800 \
-  --max-workflows 30 \
-  --max-time 2500 \
-  --quality-weight 1.6 \
-  --controller-variants full,no_slack \
-  --loads light,medium,heavy
+specnet-run --config configs/smoke.json
 ```
 
-生成的实验输出默认不会进入 Git。
+JSON 配置使用 `schema_version: 1`，键名与 argparse 的目标名一致；显式命令行参数
+优先于配置文件。未知键、错误类型和非法枚举会直接报错。不提供 `--config` 时，默认值
+和历史行为不变。生成的实验输出默认不会进入 Git。
+
+其余标准入口：
+
+```text
+specnet-export-workloads
+specnet-plot-all
+specnet-analyze-slack
+specnet-analyze-training
+```
 
 ## Controller 状态消融
 
@@ -115,6 +121,7 @@ V2.1 改善了离线估计误差，但在 3-seed 运行时预实验中没有稳�
 
 - [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md)
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- [`docs/REPRODUCIBILITY.md`](docs/REPRODUCIBILITY.md)
 
 ## 团队协作
 

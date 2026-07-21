@@ -1,6 +1,6 @@
 # 当前项目状态
 
-更新时间：2026-07-16
+更新时间：2026-07-17
 
 ## 已实现
 
@@ -15,6 +15,8 @@
   选择。
 - Work-and-queue-aware Slack v2，以及可配置的 role-aware v2.1 候选。
 - Controller ablation、Slack calibration、训练稳定性和 Pareto 分析脚本。
+- 标准 `src/specnet_agent` package、五个标准 CLI 和旧脚本兼容包装。
+- schema v1 JSON 配置、确定性回归 fixture 和 `run_manifest.json`。
 
 ## 当前默认配置
 
@@ -38,6 +40,12 @@
 - 新模块应尽量通过配置启用，并保持当前默认行为可回归。
 - 合并 QoS 或源端控制后，先运行现有测试和小型 paired preflight，再启动大规模实验。
 - 完整实验数据和个人过程报告保存在仓库之外；GitHub 仓库只维护协作所需代码和说明。
+
+## 工程验收状态
+
+- 原实验侧 12 项与分析侧 4 项测试保持兼容。
+- workload、Policy、Simulator 与训练 checkpoint 均有固定 seed 回归覆盖。
+- 核心运行仅依赖标准库；matplotlib 和开发工具通过 extras 安装。
 
 ## 下一步
 
