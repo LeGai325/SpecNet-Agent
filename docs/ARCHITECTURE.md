@@ -70,9 +70,15 @@ Simulator 支持两个网络模型：
 - `single_bottleneck`：默认模型，所有 flow 共享一条容量为 16 的 `shared` 路径。
 - `service_paths`：`planner/judge -> control`、
   `retrieval/tool/storage/background -> data`、`llm -> model`，三条路径容量均为 16。
+- `service_paths_borrowing`：先保证上述每条路径各自最多使用 16，再把当前周期未使用的
+  容量汇总，按现有 flow 权重分给仍未完成的 flow。
 
 多路径模式在每条路径内独立执行同一套 weighted max-min 分配。它不模拟 source、
 destination、逐跳链路、共享核心或 ECMP。`Flow.path_id` 仅表示逻辑容量池。
+
+borrowing 模式是工作守恒的容量共享，不改变 `Flow.path_id`。`path_results.csv` 继续记录
+物理路径服务量；`path_borrowing_results.csv` 额外记录保障容量服务量、借出量、借入量和
+借用后的剩余容量。
 
 当前多路径实现有意只修改调度。congestion、Slack、speculative pressure 和 background
 pressure 仍从全部 active flow 计算；path-aware Controller state 留作后续独立工作。

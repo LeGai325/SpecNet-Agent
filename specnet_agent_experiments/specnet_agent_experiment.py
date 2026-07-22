@@ -128,7 +128,7 @@ LOAD_CONFIG = {
     "heavy": {"mean_interarrival": 24.0, "burst_probability": 0.20, "capacity": 16.0},
 }
 
-NETWORK_MODELS = ("single_bottleneck", "service_paths")
+NETWORK_MODELS = ("single_bottleneck", "service_paths", "service_paths_borrowing")
 SERVICE_PATH_BY_TYPE = {
     "planner": "control",
     "judge": "control",
@@ -645,6 +645,21 @@ class Simulator:
         self.path_queue_pressure_samples: Dict[str, List[float]] = {
             path_id: [] for path_id in self.path_capacities
         }
+        self.path_total_base_served: Dict[str, float] = {
+            path_id: 0.0 for path_id in self.path_capacities
+        }
+        self.path_total_lent_served: Dict[str, float] = {
+            path_id: 0.0 for path_id in self.path_capacities
+        }
+        self.path_total_borrowed_received: Dict[str, float] = {
+            path_id: 0.0 for path_id in self.path_capacities
+        }
+        self.path_total_unused_after_lending: Dict[str, float] = {
+            path_id: 0.0 for path_id in self.path_capacities
+        }
+        self.path_total_home_flow_served: Dict[str, float] = {
+            path_id: 0.0 for path_id in self.path_capacities
+        }
 
     def path_for_service_type(self, service_type: str) -> str:
         if self.network_model == "single_bottleneck":
@@ -989,6 +1004,9 @@ class Simulator:
         for path_id, capacity in self.path_capacities.items():
             self.path_total_capacity[path_id] += capacity
         if not active:
+            if self.network_model == "service_paths_borrowing":
+                for path_id, capacity in self.path_capacities.items():
+                    self.path_total_unused_after_lending[path_id] += capacity
             return
 
         # Keep this global pressure definition unchanged for Controller and
@@ -996,14 +1014,52 @@ class Simulator:
         pressure = sum(flow.remaining for flow in active) / max(1.0, self.capacity)
         self.queue_pressure_samples.append(pressure)
 
+        if self.network_model != "service_paths_borrowing":
+            for path_id, capacity in self.path_capacities.items():
+                path_active = [flow for flow in active if flow.path_id == path_id]
+                if not path_active:
+                    continue
+                path_pressure = sum(flow.remaining for flow in path_active) / max(1.0, capacity)
+                self.path_queue_pressure_samples[path_id].append(path_pressure)
+                served = self.serve_capacity_pool(path_active, capacity)
+                self.path_total_served[path_id] += served
+            return
+
+        base_served: Dict[str, float] = {}
+        spare_capacity: Dict[str, float] = {}
         for path_id, capacity in self.path_capacities.items():
             path_active = [flow for flow in active if flow.path_id == path_id]
-            if not path_active:
-                continue
-            path_pressure = sum(flow.remaining for flow in path_active) / max(1.0, capacity)
-            self.path_queue_pressure_samples[path_id].append(path_pressure)
-            served = self.serve_capacity_pool(path_active, capacity)
-            self.path_total_served[path_id] += served
+            if path_active:
+                path_pressure = sum(flow.remaining for flow in path_active) / max(1.0, capacity)
+                self.path_queue_pressure_samples[path_id].append(path_pressure)
+                served = self.serve_capacity_pool(path_active, capacity)
+            else:
+                served = 0.0
+            base_served[path_id] = served
+            spare_capacity[path_id] = max(0.0, capacity - served)
+            self.path_total_base_served[path_id] += served
+            self.path_total_home_flow_served[path_id] += served
+
+        borrow_candidates = [flow for flow in active if flow.remaining > 1e-9]
+        borrow_pool = sum(spare_capacity.values())
+        served_before = {flow.flow_id: flow.served for flow in borrow_candidates}
+        borrowed_total = self.serve_capacity_pool(borrow_candidates, borrow_pool)
+        for flow in borrow_candidates:
+            borrowed = flow.served - served_before[flow.flow_id]
+            if borrowed > 1e-12:
+                self.path_total_borrowed_received[flow.path_id] += borrowed
+                self.path_total_home_flow_served[flow.path_id] += borrowed
+
+        remaining_borrowed = borrowed_total
+        for path_id in self.path_capacities:
+            lent = min(spare_capacity[path_id], remaining_borrowed)
+            unused = spare_capacity[path_id] - lent
+            self.path_total_lent_served[path_id] += lent
+            self.path_total_unused_after_lending[path_id] += unused
+            self.path_total_served[path_id] += base_served[path_id] + lent
+            remaining_borrowed -= lent
+        if remaining_borrowed > 1e-8:
+            raise RuntimeError("borrowed service exceeds available path capacity")
 
     def workflow_reward(self, workflow: WorkflowRuntime) -> float:
         if workflow.complete_time is None:
@@ -1144,6 +1200,23 @@ class Simulator:
             }
             for path_id, capacity in self.path_capacities.items()
         ]
+        path_borrowing_records = (
+            [
+                {
+                    "network_model": self.network_model,
+                    "path_id": path_id,
+                    "base_capacity": capacity,
+                    "base_served": self.path_total_base_served[path_id],
+                    "lent_served": self.path_total_lent_served[path_id],
+                    "borrowed_received": self.path_total_borrowed_received[path_id],
+                    "unused_after_lending": self.path_total_unused_after_lending[path_id],
+                    "total_home_flow_served": self.path_total_home_flow_served[path_id],
+                }
+                for path_id, capacity in self.path_capacities.items()
+            ]
+            if self.network_model == "service_paths_borrowing"
+            else []
+        )
         return {
             "policy": self.policy.name,
             "load": self.load,
@@ -1163,6 +1236,7 @@ class Simulator:
             "action_counts": dict(self.policy.action_counter),
             "workflow_records": records,
             "path_records": path_records,
+            "path_borrowing_records": path_borrowing_records,
         }
 
 
@@ -1698,7 +1772,10 @@ def parse_args() -> argparse.Namespace:
         "--network-model",
         choices=NETWORK_MODELS,
         default="single_bottleneck",
-        help="Network capacity model: one shared bottleneck or three service-specific paths.",
+        help=(
+            "Network capacity model: one shared bottleneck, three fixed service paths, "
+            "or service paths with idle-capacity borrowing."
+        ),
     )
     parser.add_argument(
         "--single-bottleneck-capacity",
@@ -1827,6 +1904,7 @@ def main() -> None:
     workflow_rows: List[Dict[str, object]] = []
     action_rows: List[Dict[str, object]] = []
     path_rows: List[Dict[str, object]] = []
+    path_borrowing_rows: List[Dict[str, object]] = []
 
     for load in loads:
         for run_index in range(args.eval_runs):
@@ -1871,7 +1949,13 @@ def main() -> None:
                     {
                         k: v
                         for k, v in summary.items()
-                        if k not in ("workflow_records", "action_counts", "path_records")
+                        if k
+                        not in (
+                            "workflow_records",
+                            "action_counts",
+                            "path_records",
+                            "path_borrowing_records",
+                        )
                     }
                 )
                 for row in summary["workflow_records"]:
@@ -1925,6 +2009,22 @@ def main() -> None:
                     }
                     path_row.update(path_record)
                     path_rows.append(path_row)
+                for borrowing_record in summary["path_borrowing_records"]:
+                    borrowing_row = {
+                        "load": load,
+                        "policy": policy_name,
+                        "controller_variant": controller_variant,
+                        "state_features": state_features,
+                        "quality_weight": quality_weight,
+                        "slack_queue_basis": args.slack_queue_basis,
+                        "slack_queue_weight": args.slack_queue_weight,
+                        "train_seed": train_seed,
+                        "eval_seed": eval_seed,
+                        "run": run_index,
+                        "seed": workload_seed,
+                    }
+                    borrowing_row.update(borrowing_record)
+                    path_borrowing_rows.append(borrowing_row)
 
     aggregate_rows = aggregate_summaries(summaries)
     write_csv(os.path.join(args.output_dir, "summary_by_run.csv"), summaries)
@@ -1933,10 +2033,19 @@ def main() -> None:
     write_csv(os.path.join(args.output_dir, "action_counts.csv"), action_rows)
     write_csv(os.path.join(args.output_dir, "trained_agents.csv"), trained_agent_rows)
     write_csv(os.path.join(args.output_dir, "path_results.csv"), path_rows)
+    write_csv(
+        os.path.join(args.output_dir, "path_borrowing_results.csv"),
+        path_borrowing_rows,
+    )
     write_json(
         os.path.join(args.output_dir, "specnet_agent_model.json"),
         {
             "network_model": args.network_model,
+            **(
+                {"borrowing_enabled": True}
+                if args.network_model == "service_paths_borrowing"
+                else {}
+            ),
             "path_capacities": (
                 {"shared": args.single_bottleneck_capacity or LOAD_CONFIG[loads[0]]["capacity"]}
                 if args.network_model == "single_bottleneck"

@@ -89,6 +89,23 @@ python3 specnet_agent_experiments/specnet_agent_experiment.py \
   --max-time 2500
 ```
 
+工作守恒版本保留上述服务主路径和每条路径 16 单位保障容量，并允许仍有积压的路径
+借用其他路径在当前周期未使用的容量：
+
+```bash
+python3 specnet_agent_experiments/specnet_agent_experiment.py \
+  --network-model service_paths_borrowing \
+  --output-dir outputs/service_paths_borrowing_smoke \
+  --train-episodes 3 \
+  --eval-runs 1 \
+  --duration 800 \
+  --max-workflows 30 \
+  --max-time 2500
+```
+
+借用只发生在容量分配阶段，不改变 flow 的服务主路径，也不实现逐跳选路或迁移。
+借入、借出和借用后空闲容量写入 `path_borrowing_results.csv`。
+
 该模式只改变容量分配：Controller 的 congestion、Slack 和 speculative pressure 仍按
 全局 active flow 聚合。三条路径的总理论容量为 48，因此它与单瓶颈模式的差异同时包含
 路径隔离和额外并行容量，不能解释为纯调度收益。逐路径统计写入 `path_results.csv`。
@@ -142,7 +159,8 @@ V2.1 改善了离线估计误差，但在 3-seed 运行时预实验中没有稳�
 - `no_source_control` 当前由 `critical_path_only` 代理，不是严格的单开关消融。
 - `no_learning` 当前由 `rule_balanced` 代理。
 - Queue priority 目前通过模拟器中的 weighted allocation 实现，不是真实 Q0-Q3 队列。
-- `service_paths` 是服务类型级逻辑路径，不是逐跳拓扑或 ECMP；Controller 状态仍是全局聚合。
+- `service_paths` 及其 borrowing 版本是服务类型级逻辑路径，不是逐跳拓扑或 ECMP；
+  Controller 状态仍是全局聚合。
 - 完整实验输出和个人过程报告保存在 Git 之外。
 
 修改 Controller 语义前，请先阅读：

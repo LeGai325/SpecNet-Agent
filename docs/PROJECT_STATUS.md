@@ -15,7 +15,8 @@
   选择。
 - Work-and-queue-aware Slack v2，以及可配置的 role-aware v2.1 候选。
 - Controller ablation、Slack calibration、训练稳定性和 Pareto 分析脚本。
-- 可选的三条服务逻辑路径调度，以及逐路径容量、利用率和队列压力输出。
+- 可选的三条服务逻辑路径调度、工作守恒的空闲容量借用，以及逐路径容量、利用率、
+  队列压力和借用统计输出。
 
 ## 当前默认配置
 
@@ -34,6 +35,8 @@
 - Speculative-pressure、真实源端控制和 QoS 队列模块仍需与其他开发者代码合并。
 - `service_paths` 只隔离调度容量；Controller congestion、Slack 和 speculative pressure
   仍是全局聚合状态，尚未实现 path-aware state。
+- `service_paths_borrowing` 只共享当前周期的剩余容量，不实现动态最短队列选路、flow
+  迁移或逐跳路径。
 - 服务逻辑路径不是逐跳拓扑，不包含共享核心、ECMP 或路由变化。
 
 ## 合并时的约束

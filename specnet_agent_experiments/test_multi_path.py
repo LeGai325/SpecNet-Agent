@@ -123,6 +123,94 @@ class MultiPathSchedulerTest(unittest.TestCase):
         self.assertEqual(simulator.total_served, 32.0)
         self.assertEqual(simulator.total_capacity, 48.0)
 
+    def test_borrowing_uses_all_idle_path_capacity(self) -> None:
+        simulator = self.make_simulator(network_model="service_paths_borrowing")
+        first = self.add_flow(simulator, 0, "retrieval")
+        second = self.add_flow(simulator, 1, "tool")
+
+        simulator.serve_active_flows()
+
+        self.assertEqual(simulator.flows[first].served, 24.0)
+        self.assertEqual(simulator.flows[second].served, 24.0)
+        self.assertEqual(simulator.total_served, 48.0)
+        self.assertEqual(simulator.path_total_base_served["data"], 16.0)
+        self.assertEqual(simulator.path_total_borrowed_received["data"], 32.0)
+        self.assertEqual(simulator.path_total_lent_served["control"], 16.0)
+        self.assertEqual(simulator.path_total_lent_served["model"], 16.0)
+
+    def test_borrowing_uses_only_residual_base_capacity(self) -> None:
+        simulator = self.make_simulator(network_model="service_paths_borrowing")
+        control = simulator.new_flow(
+            simulator.workflows[0], "planner", 4.0, "critical_control", "diagnostic"
+        )
+        data = self.add_flow(simulator, 1, "retrieval")
+
+        simulator.serve_active_flows()
+
+        self.assertEqual(simulator.flows[control].served, 4.0)
+        self.assertEqual(simulator.flows[data].served, 44.0)
+        self.assertEqual(simulator.path_total_lent_served["control"], 12.0)
+        self.assertEqual(simulator.path_total_lent_served["model"], 16.0)
+        self.assertEqual(sum(simulator.path_total_served.values()), 48.0)
+        for path_id in experiment.SERVICE_PATH_ORDER:
+            self.assertLessEqual(simulator.path_total_served[path_id], 16.0)
+
+    def test_borrowing_matches_fixed_paths_when_all_paths_are_busy(self) -> None:
+        served_by_model = {}
+        for network_model in ("service_paths", "service_paths_borrowing"):
+            simulator = self.make_simulator(network_model=network_model)
+            flow_ids = [
+                self.add_flow(simulator, 0, "planner", role="critical_control"),
+                self.add_flow(simulator, 0, "retrieval"),
+                self.add_flow(simulator, 1, "llm", role="critical_bulk"),
+            ]
+            simulator.serve_active_flows()
+            served_by_model[network_model] = [simulator.flows[flow_id].served for flow_id in flow_ids]
+
+        self.assertEqual(served_by_model["service_paths"], [16.0, 16.0, 16.0])
+        self.assertEqual(
+            served_by_model["service_paths_borrowing"],
+            served_by_model["service_paths"],
+        )
+
+    def test_borrow_pool_preserves_policy_weights(self) -> None:
+        simulator = self.make_simulator(
+            policy=experiment.CriticalPathOnlyPolicy(),
+            network_model="service_paths_borrowing",
+        )
+        critical = self.add_flow(simulator, 0, "retrieval", role="critical_control")
+        normal = self.add_flow(simulator, 1, "tool", role="normal")
+
+        simulator.serve_active_flows()
+
+        self.assertAlmostEqual(simulator.flows[critical].served, 38.4)
+        self.assertAlmostEqual(simulator.flows[normal].served, 9.6)
+        self.assertAlmostEqual(simulator.total_served, 48.0)
+
+        static = self.make_simulator(
+            policy=experiment.StaticPriorityPolicy(),
+            network_model="service_paths_borrowing",
+        )
+        retrieval = self.add_flow(static, 0, "retrieval")
+        tool = self.add_flow(static, 1, "tool")
+        static.serve_active_flows()
+        self.assertAlmostEqual(static.flows[retrieval].served, 48.0 * 2.5 / 4.5)
+        self.assertAlmostEqual(static.flows[tool].served, 48.0 * 2.0 / 4.5)
+
+    def test_borrowing_recycles_small_flow_capacity_in_same_epoch(self) -> None:
+        simulator = self.make_simulator(network_model="service_paths_borrowing")
+        small = simulator.new_flow(
+            simulator.workflows[0], "retrieval", 4.0, "normal", "diagnostic"
+        )
+        large = self.add_flow(simulator, 1, "tool")
+
+        simulator.serve_active_flows()
+
+        self.assertEqual(simulator.flows[small].completed_at, 1)
+        self.assertEqual(simulator.flows[small].served, 4.0)
+        self.assertEqual(simulator.flows[large].served, 44.0)
+        self.assertEqual(simulator.total_served, 48.0)
+
     def test_same_path_preserves_fifo_and_policy_weights(self) -> None:
         fifo = self.make_simulator()
         first = self.add_flow(fifo, 0, "retrieval")
@@ -229,56 +317,114 @@ class MultiPathSchedulerTest(unittest.TestCase):
         self.assertEqual({flow.path_id for flow in simulator.flows.values()}, {"shared"})
 
     def test_training_and_validation_use_selected_network_model(self) -> None:
-        observed_models = []
         original_simulator = experiment.Simulator
 
-        class RecordingSimulator(original_simulator):
-            def __init__(self, *args, **kwargs):
-                observed_models.append(kwargs.get("network_model"))
-                super().__init__(*args, **kwargs)
+        for network_model in ("service_paths", "service_paths_borrowing"):
+            with self.subTest(network_model=network_model):
+                observed_models = []
 
-        with patch.object(experiment, "Simulator", RecordingSimulator):
-            policy = experiment.train_specnet_agent(
-                episodes=2,
-                loads=["light"],
-                duration=80,
-                max_workflows=2,
-                max_time=400,
-                seed=31,
-                quality_weight=1.6,
-                checkpoint_episodes=[1],
-                checkpoint_selection="best_validation",
-                validation_seed=9021,
-                checkpoint_eval_runs=1,
-                network_model="service_paths",
-            )
-        self.assertTrue(observed_models)
-        self.assertEqual(set(observed_models), {"service_paths"})
-        self.assertTrue(all("validation" in item for item in policy.training_checkpoints))
+                class RecordingSimulator(original_simulator):
+                    def __init__(self, *args, **kwargs):
+                        observed_models.append(kwargs.get("network_model"))
+                        super().__init__(*args, **kwargs)
+
+                with patch.object(experiment, "Simulator", RecordingSimulator):
+                    policy = experiment.train_specnet_agent(
+                        episodes=2,
+                        loads=["light"],
+                        duration=80,
+                        max_workflows=2,
+                        max_time=400,
+                        seed=31,
+                        quality_weight=1.6,
+                        checkpoint_episodes=[1],
+                        checkpoint_selection="best_validation",
+                        validation_seed=9021,
+                        checkpoint_eval_runs=1,
+                        network_model=network_model,
+                    )
+                self.assertTrue(observed_models)
+                self.assertEqual(set(observed_models), {network_model})
+                self.assertTrue(all("validation" in item for item in policy.training_checkpoints))
 
     def test_service_paths_are_deterministic_for_fixed_seed(self) -> None:
         specs = experiment.generate_workload(321, "medium", 200, 4)
-        summaries = []
-        served = []
-        for _ in range(2):
-            simulator = experiment.Simulator(
-                specs,
-                experiment.FIFOPolicy(seed=9),
-                "medium",
-                321,
-                200,
-                800,
-                network_model="service_paths",
-            )
-            summary = simulator.run()
-            summaries.append(
-                {key: value for key, value in summary.items() if key not in {"workflow_records", "path_records"}}
-            )
-            served.append(
-                [(flow.flow_id, flow.path_id, flow.served, flow.completed_at) for flow in simulator.flows.values()]
-            )
-        self.assertEqual(summaries[0], summaries[1])
-        self.assertEqual(served[0], served[1])
+        for network_model in ("service_paths", "service_paths_borrowing"):
+            with self.subTest(network_model=network_model):
+                summaries = []
+                served = []
+                for _ in range(2):
+                    simulator = experiment.Simulator(
+                        specs,
+                        experiment.FIFOPolicy(seed=9),
+                        "medium",
+                        321,
+                        200,
+                        800,
+                        network_model=network_model,
+                    )
+                    summary = simulator.run()
+                    summaries.append(
+                        {
+                            key: value
+                            for key, value in summary.items()
+                            if key not in {
+                                "workflow_records",
+                                "path_records",
+                                "path_borrowing_records",
+                            }
+                        }
+                    )
+                    served.append(
+                        [
+                            (flow.flow_id, flow.path_id, flow.served, flow.completed_at)
+                            for flow in simulator.flows.values()
+                        ]
+                    )
+                self.assertEqual(summaries[0], summaries[1])
+                self.assertEqual(served[0], served[1])
+
+    def test_cli_borrowing_output_contract(self) -> None:
+        output_dir = Path(__file__).resolve().parent / "test_artifacts" / "borrowing"
+        shutil.rmtree(output_dir.parent, ignore_errors=True)
+        args = [
+            "specnet_agent_experiment.py",
+            "--network-model", "service_paths_borrowing",
+            "--output-dir", str(output_dir),
+            "--loads", "light",
+            "--train-episodes", "1",
+            "--eval-runs", "1",
+            "--duration", "20",
+            "--max-workflows", "0",
+            "--max-time", "40",
+            "--checkpoint-episodes", "1",
+        ]
+        try:
+            with patch.object(sys, "argv", args), redirect_stdout(io.StringIO()):
+                experiment.main()
+            with (output_dir / "path_borrowing_results.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                reader = csv.DictReader(handle)
+                rows = list(reader)
+                self.assertEqual(
+                    reader.fieldnames,
+                    [
+                        "load", "policy", "controller_variant", "state_features",
+                        "quality_weight", "slack_queue_basis", "slack_queue_weight",
+                        "train_seed", "eval_seed", "run", "seed", "network_model",
+                        "path_id", "base_capacity", "base_served", "lent_served",
+                        "borrowed_received", "unused_after_lending",
+                        "total_home_flow_served",
+                    ],
+                )
+            self.assertEqual({row["path_id"] for row in rows}, set(experiment.SERVICE_PATH_ORDER))
+            self.assertTrue(all(float(row["base_capacity"]) == 16.0 for row in rows))
+            model = json.loads((output_dir / "specnet_agent_model.json").read_text(encoding="utf-8"))
+            self.assertEqual(model["network_model"], "service_paths_borrowing")
+            self.assertTrue(model["borrowing_enabled"])
+        finally:
+            shutil.rmtree(output_dir.parent, ignore_errors=True)
 
     def test_cli_path_results_contract_and_invalid_model(self) -> None:
         output_dir = Path(__file__).resolve().parent / "test_artifacts" / "multi_path"
