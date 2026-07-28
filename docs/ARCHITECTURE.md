@@ -80,8 +80,14 @@ borrowing 模式是工作守恒的容量共享，不改变 `Flow.path_id`。`pat
 物理路径服务量；`path_borrowing_results.csv` 额外记录保障容量服务量、借出量、借入量和
 借用后的剩余容量。
 
-当前多路径实现有意只修改调度。congestion、Slack、speculative pressure 和 background
-pressure 仍从全部 active flow 计算；path-aware Controller state 留作后续独立工作。
+当前多路径实现中的 congestion、Slack、speculative pressure 和 background pressure
+仍从全部 active flow 计算；只有显式选择的新 variant 会补充紧凑路径状态。
+
+`path_aware_quality` controller variant 额外提供紧凑的逐路径决策状态：
+`slack`、最拥挤 required path pressure、跨路径 optional headroom 和全局
+speculative pressure。required pressure 与 headroom 都按 12 个调度周期的逐路径容量
+归一化；在单瓶颈模式下会确定性退化为一个 shared path。旧 controller variant
+及其状态键保持不变。
 
 合并真实 QoS 时，建议：
 

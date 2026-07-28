@@ -28,6 +28,12 @@ CONTROLLER_VARIANT_FEATURES = {
     "congestion_only": ("congestion",),
     "no_slack": ("congestion", "spec_pressure"),
     "no_spec_pressure": ("congestion", "slack"),
+    "path_aware_quality": (
+        "slack",
+        "required_path_pressure",
+        "optional_headroom",
+        "spec_pressure",
+    ),
 }
 StateKey = Tuple[str, ...]
 SLACK_QUEUE_BASES = ("total", "policy_weighted")
@@ -250,6 +256,10 @@ class WorkflowRuntime:
     decision_estimated_remaining_time: Optional[float] = None
     decision_slack_ratio: Optional[float] = None
     decision_slack_bucket: Optional[str] = None
+    decision_required_path_pressure_ratio: Optional[float] = None
+    decision_required_path_pressure_bucket: Optional[str] = None
+    decision_optional_headroom_ratio: Optional[float] = None
+    decision_optional_headroom_bucket: Optional[str] = None
     predicted_quality: float = 1.0
     quality: float = BASE_REQUIRED_QUALITY
     wasted_speculative_bytes: float = 0.0
@@ -563,6 +573,8 @@ class SpecNetAgentBanditPolicy(CriticalPathOnlyPolicy):
             "congestion": sim.congestion_level,
             "slack": lambda: sim.workflow_slack_bucket(workflow),
             "spec_pressure": sim.speculative_pressure_bucket,
+            "required_path_pressure": lambda: sim.required_path_pressure_bucket(workflow),
+            "optional_headroom": lambda: sim.optional_headroom_bucket(workflow),
         }
         return tuple(state_getters[feature]() for feature in self.state_features)
 
@@ -842,6 +854,50 @@ class Simulator:
         required_branch_work = sum(branch.size for branch in workflow.spec.branches if branch.required)
         return required_branch_work + workflow.spec.llm_size + workflow.spec.judge_size
 
+    def required_work_by_path(self, workflow: WorkflowRuntime) -> Dict[str, float]:
+        required_work = {path_id: 0.0 for path_id in self.path_capacities}
+        for flow in self.active_flows():
+            if flow.required:
+                required_work[flow.path_id] += flow.remaining
+        for branch in workflow.spec.branches:
+            if branch.required:
+                required_work[self.path_for_service_type(branch.service_type)] += branch.size
+        required_work[self.path_for_service_type("llm")] += workflow.spec.llm_size
+        required_work[self.path_for_service_type("judge")] += workflow.spec.judge_size
+        return required_work
+
+    def required_path_pressure_ratio(self, workflow: WorkflowRuntime) -> float:
+        required_work = self.required_work_by_path(workflow)
+        return max(
+            required_work[path_id] / max(1.0, capacity * 12.0)
+            for path_id, capacity in self.path_capacities.items()
+        )
+
+    def required_path_pressure_bucket(self, workflow: WorkflowRuntime) -> str:
+        ratio = self.required_path_pressure_ratio(workflow)
+        if ratio < 0.85:
+            return "low_required_path"
+        if ratio < 1.85:
+            return "mid_required_path"
+        return "high_required_path"
+
+    def optional_headroom_ratio(self, workflow: WorkflowRuntime) -> float:
+        required_work = self.required_work_by_path(workflow)
+        total_horizon_capacity = sum(self.path_capacities.values()) * 12.0
+        headroom = sum(
+            max(capacity * 12.0 - required_work[path_id], 0.0)
+            for path_id, capacity in self.path_capacities.items()
+        )
+        return headroom / max(1.0, total_horizon_capacity)
+
+    def optional_headroom_bucket(self, workflow: WorkflowRuntime) -> str:
+        ratio = self.optional_headroom_ratio(workflow)
+        if ratio < 0.25:
+            return "low_optional_headroom"
+        if ratio < 0.60:
+            return "mid_optional_headroom"
+        return "high_optional_headroom"
+
     def slack_queue_work(self, queue_diagnostics: Optional[Dict[str, float]] = None) -> float:
         if self.slack_queue_basis == "total":
             return self.remaining_active_bytes()
@@ -898,6 +954,10 @@ class Simulator:
         workflow.decision_estimated_remaining_time = self.workflow_estimated_remaining_time(workflow)
         workflow.decision_slack_ratio = self.workflow_slack_ratio(workflow)
         workflow.decision_slack_bucket = self.workflow_slack_bucket(workflow)
+        workflow.decision_required_path_pressure_ratio = self.required_path_pressure_ratio(workflow)
+        workflow.decision_required_path_pressure_bucket = self.required_path_pressure_bucket(workflow)
+        workflow.decision_optional_headroom_ratio = self.optional_headroom_ratio(workflow)
+        workflow.decision_optional_headroom_bucket = self.optional_headroom_bucket(workflow)
 
     def spawn_arrivals(self) -> None:
         for workflow in self.workflows.values():
@@ -1324,6 +1384,22 @@ class Simulator:
                     if workflow.decision_slack_ratio is not None
                     else "",
                     "decision_slack_bucket": workflow.decision_slack_bucket or "",
+                    "decision_required_path_pressure_ratio": (
+                        workflow.decision_required_path_pressure_ratio
+                        if workflow.decision_required_path_pressure_ratio is not None
+                        else ""
+                    ),
+                    "decision_required_path_pressure_bucket": (
+                        workflow.decision_required_path_pressure_bucket or ""
+                    ),
+                    "decision_optional_headroom_ratio": (
+                        workflow.decision_optional_headroom_ratio
+                        if workflow.decision_optional_headroom_ratio is not None
+                        else ""
+                    ),
+                    "decision_optional_headroom_bucket": (
+                        workflow.decision_optional_headroom_bucket or ""
+                    ),
                     "actual_remaining_latency": workflow.complete_time - workflow.decision_time
                     if workflow.decision_time is not None
                     else "",

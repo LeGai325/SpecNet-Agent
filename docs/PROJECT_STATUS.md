@@ -22,6 +22,8 @@
 - 可选 `decoupled` action 模式将 optional branch fanout 与后台流量独立控制；
   默认 `legacy` 模式保留用于复现旧实验。
 - optional branch 在 planner 完成后按 utility/byte 一次性选入；动态追加和停止延期。
+- 新增 `path_aware_quality` controller variant，以 required path pressure 和
+  optional headroom 表达多路径状态；原有 controller variant 保持兼容。
 
 ## 当前默认配置
 
