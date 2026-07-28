@@ -307,7 +307,9 @@ class MultiPathSchedulerTest(unittest.TestCase):
             "deadline_miss_ratio": 0.0,
             "wasted_speculative_bytes_per_workflow": 64.29588965483224,
             "background_bytes_served_per_workflow": 17.06745416716222,
-            "avg_quality": 1.0,
+            # Realized quality now depends on retained optional utility. In
+            # this fixture no optional branch completes before the judge.
+            "avg_quality": experiment.BASE_REQUIRED_QUALITY,
             "link_utilization": 0.25990099009900963,
             "avg_queue_pressure": 19.926616659175625,
         }

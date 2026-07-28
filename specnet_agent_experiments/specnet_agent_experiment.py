@@ -140,6 +140,20 @@ SERVICE_PATH_BY_TYPE = {
 }
 SERVICE_PATH_ORDER = ("control", "data", "model")
 SERVICE_PATH_CAPACITY = 16.0
+BASE_REQUIRED_QUALITY = 0.76
+DEFAULT_QUALITY_TARGET = 0.95
+OPTIONAL_SERVICE_UTILITY = {
+    "retrieval": 1.00,
+    "tool": 1.10,
+    "storage": 0.75,
+    "llm": 1.25,
+}
+JUDGE_RETAIN_LIMIT = {
+    "rag_qa": 3,
+    "coding": 2,
+    "research": 4,
+    "debate": 2,
+}
 
 
 @dataclass
@@ -147,6 +161,9 @@ class BranchSpec:
     service_type: str
     size: float
     required: bool
+    branch_index: int = 0
+    selection_probability: float = 0.0
+    expected_utility: float = 0.0
 
 
 @dataclass
@@ -179,6 +196,10 @@ class Flow:
     cancelled: bool = False
     served: float = 0.0
     path_id: str = "shared"
+    selection_probability: float = 0.0
+    expected_utility: float = 0.0
+    retained: bool = False
+    used_by_judge: bool = False
 
 
 @dataclass
@@ -217,9 +238,16 @@ class WorkflowRuntime:
     decision_estimated_remaining_time: Optional[float] = None
     decision_slack_ratio: Optional[float] = None
     decision_slack_bucket: Optional[str] = None
-    quality: float = 1.0
+    predicted_quality: float = 1.0
+    quality: float = BASE_REQUIRED_QUALITY
     wasted_speculative_bytes: float = 0.0
+    useful_speculative_bytes: float = 0.0
+    unused_speculative_bytes: float = 0.0
+    retained_optional_count: int = 0
+    selected_optional_utility: float = 0.0
+    total_optional_utility: float = 0.0
     background_bytes_served: float = 0.0
+    quality_accounted: bool = False
 
     @property
     def deadline_time(self) -> float:
@@ -248,6 +276,14 @@ def percentile(values: List[float], p: float) -> float:
     return sorted_values[low] * (1 - weight) + sorted_values[high] * weight
 
 
+def optional_branch_value(service_type: str, optional_rank: int) -> Tuple[float, float]:
+    """Return deterministic selection probability and expected quality utility."""
+    base_utility = OPTIONAL_SERVICE_UTILITY.get(service_type, 0.80)
+    selection_probability = max(0.20, 0.90 / (1.0 + 0.22 * optional_rank))
+    expected_utility = selection_probability * base_utility
+    return selection_probability, expected_utility
+
+
 def generate_workload(
     seed: int,
     load: str,
@@ -274,12 +310,26 @@ def generate_workload(
         meta = TEMPLATES[template]
         required_count = meta["required_branches"]
         branches: List[BranchSpec] = []
+        optional_rank = 0
         for idx, service_type in enumerate(meta["branch_types"]):
+            required = idx < required_count
+            if required:
+                selection_probability = 1.0
+                expected_utility = 0.0
+            else:
+                selection_probability, expected_utility = optional_branch_value(
+                    service_type,
+                    optional_rank,
+                )
+                optional_rank += 1
             branches.append(
                 BranchSpec(
                     service_type=service_type,
                     size=lognormal_size(rng, service_type),
-                    required=idx < required_count,
+                    required=required,
+                    branch_index=idx,
+                    selection_probability=selection_probability,
+                    expected_utility=expected_utility,
                 )
             )
 
@@ -679,6 +729,8 @@ class Simulator:
         required: bool = False,
         speculative: bool = False,
         background: bool = False,
+        selection_probability: float = 0.0,
+        expected_utility: float = 0.0,
     ) -> int:
         flow = Flow(
             flow_id=self.next_flow_id,
@@ -693,6 +745,8 @@ class Simulator:
             background=background,
             created_at=self.time,
             path_id=self.path_for_service_type(service_type),
+            selection_probability=selection_probability,
+            expected_utility=expected_utility,
         )
         self.flows[flow.flow_id] = flow
         self.next_flow_id += 1
@@ -864,6 +918,7 @@ class Simulator:
         return max(required, min(max_branches, by_fraction, by_extra))
 
     def quality_for_action(self, workflow: WorkflowRuntime, action: str, branch_count: int) -> float:
+        """Estimate quality before execution; realized quality is computed at completion."""
         meta = TEMPLATES[workflow.spec.template]
         max_branches = meta["max_branches"]
         required = meta["required_branches"]
@@ -878,7 +933,7 @@ class Simulator:
         action = self.policy.decide_action(self, workflow)
         workflow.action = action
         branch_count = self.branch_count_for_action(workflow, action)
-        workflow.quality = self.quality_for_action(workflow, action, branch_count)
+        workflow.predicted_quality = self.quality_for_action(workflow, action, branch_count)
         workflow.stage = "branches"
 
         for index, branch in enumerate(workflow.spec.branches[:branch_count]):
@@ -893,6 +948,8 @@ class Simulator:
                 stage="branch",
                 required=required,
                 speculative=speculative,
+                selection_probability=branch.selection_probability,
+                expected_utility=branch.expected_utility,
             )
             workflow.branch_flows.append(flow_id)
             if required:
@@ -946,11 +1003,7 @@ class Simulator:
     def finish_workflow(self, workflow: WorkflowRuntime) -> None:
         workflow.stage = "done"
         workflow.complete_time = self.time
-        for flow_id in workflow.speculative_branch_flows:
-            flow = self.flows[flow_id]
-            workflow.wasted_speculative_bytes += flow.served
-            if flow.completed_at is None:
-                flow.cancelled = True
+        self.finalize_quality_and_speculation(workflow)
         for flow_id in workflow.background_flows:
             flow = self.flows[flow_id]
             workflow.background_bytes_served += flow.served
@@ -958,6 +1011,56 @@ class Simulator:
                 flow.cancelled = True
         self.completed_workflows.append(workflow)
         self.policy.on_workflow_complete(workflow, self)
+
+    def finalize_quality_and_speculation(self, workflow: WorkflowRuntime) -> None:
+        if workflow.quality_accounted:
+            return
+
+        optional_specs = [branch for branch in workflow.spec.branches if not branch.required]
+        retain_limit = JUDGE_RETAIN_LIMIT.get(workflow.spec.template, len(optional_specs))
+        potential = sorted(
+            (branch.expected_utility for branch in optional_specs),
+            reverse=True,
+        )[:retain_limit]
+        workflow.total_optional_utility = sum(potential)
+
+        completed_optional = [
+            self.flows[flow_id]
+            for flow_id in workflow.speculative_branch_flows
+            if self.flows[flow_id].completed_at is not None
+        ]
+        for flow in completed_optional:
+            flow.retained = True
+        used = sorted(
+            completed_optional,
+            key=lambda flow: (-flow.expected_utility, flow.flow_id),
+        )[:retain_limit]
+        used_ids = {flow.flow_id for flow in used}
+        for flow in used:
+            flow.used_by_judge = True
+            workflow.useful_speculative_bytes += flow.served
+            workflow.selected_optional_utility += flow.expected_utility
+        workflow.retained_optional_count = len(used)
+
+        for flow_id in workflow.speculative_branch_flows:
+            flow = self.flows[flow_id]
+            if flow_id not in used_ids:
+                workflow.wasted_speculative_bytes += flow.served
+                workflow.unused_speculative_bytes += flow.served
+            if flow.completed_at is None:
+                flow.cancelled = True
+
+        if workflow.total_optional_utility <= 1e-12:
+            workflow.quality = 1.0
+        else:
+            retained_fraction = min(
+                1.0,
+                workflow.selected_optional_utility / workflow.total_optional_utility,
+            )
+            workflow.quality = BASE_REQUIRED_QUALITY + (
+                1.0 - BASE_REQUIRED_QUALITY
+            ) * retained_fraction
+        workflow.quality_accounted = True
 
     def serve_capacity_pool(self, active: List[Flow], capacity: float) -> float:
         # Weighted max-min style allocation. It avoids wasting capacity when
@@ -1099,6 +1202,12 @@ class Simulator:
         for workflow in self.workflows.values():
             if workflow.complete_time is None and workflow.stage != "not_arrived":
                 workflow.complete_time = self.max_time
+                self.finalize_quality_and_speculation(workflow)
+                for flow_id in workflow.background_flows:
+                    flow = self.flows[flow_id]
+                    workflow.background_bytes_served += flow.served
+                    if flow.completed_at is None:
+                        flow.cancelled = True
                 self.completed_workflows.append(workflow)
 
         return self.summary()
@@ -1115,7 +1224,11 @@ class Simulator:
                     "deadline": workflow.spec.deadline,
                     "latency": latency,
                     "deadline_miss": 1 if latency > workflow.spec.deadline else 0,
+                    "predicted_quality": workflow.predicted_quality,
                     "quality": workflow.quality,
+                    "quality_target_met": 1
+                    if workflow.quality >= DEFAULT_QUALITY_TARGET
+                    else 0,
                     "action": workflow.action or "none",
                     "decision_time": workflow.decision_time if workflow.decision_time is not None else "",
                     "decision_remaining_budget": workflow.decision_remaining_budget
@@ -1176,6 +1289,11 @@ class Simulator:
                     if workflow.decision_time is not None
                     else "",
                     "wasted_speculative_bytes": workflow.wasted_speculative_bytes,
+                    "useful_speculative_bytes": workflow.useful_speculative_bytes,
+                    "unused_speculative_bytes": workflow.unused_speculative_bytes,
+                    "retained_optional_count": workflow.retained_optional_count,
+                    "selected_optional_utility": workflow.selected_optional_utility,
+                    "total_optional_utility": workflow.total_optional_utility,
                     "background_bytes_served": workflow.background_bytes_served,
                 }
             )
@@ -1183,8 +1301,11 @@ class Simulator:
         completed = len(records)
         miss_ratio = sum(row["deadline_miss"] for row in records) / max(1, completed)
         total_wasted = sum(row["wasted_speculative_bytes"] for row in records)
+        total_useful = sum(row["useful_speculative_bytes"] for row in records)
+        total_unused = sum(row["unused_speculative_bytes"] for row in records)
         total_bg = sum(row["background_bytes_served"] for row in records)
         avg_quality = sum(row["quality"] for row in records) / max(1, completed)
+        quality_target_ratio = sum(row["quality_target_met"] for row in records) / max(1, completed)
         path_records = [
             {
                 "network_model": self.network_model,
@@ -1229,8 +1350,11 @@ class Simulator:
             "p99_latency": percentile(latencies, 0.99),
             "deadline_miss_ratio": miss_ratio,
             "wasted_speculative_bytes_per_workflow": total_wasted / max(1, completed),
+            "useful_speculative_bytes_per_workflow": total_useful / max(1, completed),
+            "unused_speculative_bytes_per_workflow": total_unused / max(1, completed),
             "background_bytes_served_per_workflow": total_bg / max(1, completed),
             "avg_quality": avg_quality,
+            "quality_target_met_ratio": quality_target_ratio,
             "link_utilization": self.total_served / max(1.0, self.total_capacity),
             "avg_queue_pressure": statistics.mean(self.queue_pressure_samples) if self.queue_pressure_samples else 0.0,
             "action_counts": dict(self.policy.action_counter),
@@ -1363,7 +1487,10 @@ def summarize_training_window(summaries: List[Dict[str, object]]) -> Dict[str, o
         "p99_latency",
         "deadline_miss_ratio",
         "wasted_speculative_bytes_per_workflow",
+        "useful_speculative_bytes_per_workflow",
+        "unused_speculative_bytes_per_workflow",
         "avg_quality",
+        "quality_target_met_ratio",
     )
     return {
         "episodes": len(summaries),
@@ -1448,7 +1575,11 @@ def evaluate_training_checkpoint(
                     "wasted_speculative_bytes_per_workflow": float(
                         summary["wasted_speculative_bytes_per_workflow"]
                     ),
+                    "useful_speculative_bytes_per_workflow": float(
+                        summary["useful_speculative_bytes_per_workflow"]
+                    ),
                     "avg_quality": float(summary["avg_quality"]),
+                    "quality_target_met_ratio": float(summary["quality_target_met_ratio"]),
                 }
             )
 
@@ -1620,8 +1751,11 @@ def aggregate_summaries(summaries: List[Dict[str, object]]) -> List[Dict[str, ob
             "p99_latency",
             "deadline_miss_ratio",
             "wasted_speculative_bytes_per_workflow",
+            "useful_speculative_bytes_per_workflow",
+            "unused_speculative_bytes_per_workflow",
             "background_bytes_served_per_workflow",
             "avg_quality",
+            "quality_target_met_ratio",
             "link_utilization",
             "avg_queue_pressure",
         ]

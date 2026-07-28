@@ -17,6 +17,8 @@
 - Controller ablation、Slack calibration、训练稳定性和 Pareto 分析脚本。
 - 可选的三条服务逻辑路径调度、工作守恒的空闲容量借用，以及逐路径容量、利用率、
   队列压力和借用统计输出。
+- 基于实际 retained optional utility 的 realized quality，以及 useful/unused
+  speculative bytes 分离记账。
 
 ## 当前默认配置
 

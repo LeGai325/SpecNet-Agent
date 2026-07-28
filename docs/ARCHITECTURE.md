@@ -95,6 +95,11 @@ pressure 仍从全部 active flow 计算；path-aware Controller state 留作后
 `Simulator.spawn_branches()` 根据 `ACTION_CONFIG` 决定 fanout、额外 branch 和后台流量。
 当前行为是模拟式 fanout 控制。
 
+Quality 在 workflow 完成时根据实际完成并被 judge 采用的 optional branch utility
+计算，不再在动作生成时直接固定。完成且被采用的 speculative bytes 记为 useful；
+未采用、被取消或部分失效的 speculative bytes 才记为 waste。Branch utility 由
+template、branch rank 和 service type 确定性生成，不消耗原 workload 随机序列。
+
 合并真实源端控制时，应把新的 fanout/top-k/parallel-agent 控制映射集中在这一层，避免
 同时修改 reward 或网络 scheduler。
 
