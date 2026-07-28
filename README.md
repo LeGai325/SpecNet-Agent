@@ -214,6 +214,15 @@ Run the same command once with `--safety-guard off` and once with `on`.
 Rule/Bandit × Guard off/on 2×2 ablation. `lambda_updates.csv` records one
 Lagrange-multiplier update per complete load cycle.
 
+Generate the quality-balance figures without overwriting the earlier
+`plotting_multi/figures` directory:
+
+```bash
+python specnet_plotting/plotting_multi/plot_quality_balance.py \
+  --input-root outputs/quality_balance_20260728 \
+  --output-dir specnet_plotting/plotting_multi/figures_quality_balance_20260728
+```
+
 ## License
 
 当前尚未选择开源许可证。添加 License 前，需要由项目负责人确认仓库的共享和发布范围。
