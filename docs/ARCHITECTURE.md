@@ -131,6 +131,13 @@ path_results.csv
 仍保留原来的全局 active bytes/16 口径。分析脚本位于 `specnet_plotting/`。所有生成文件
 放在 `outputs/`，不进入 Git。
 
+### Action 与 background 解耦
+
+`ACTION_CONFIG` 继续定义兼容的 branch fanout。可选 `decoupled` 模式使用
+`DECOUPLED_BACKGROUND_SCALE` 独立控制合成后台流量，降低后台 bytes 不再隐式删除
+承载质量收益的 optional branch。默认 `legacy` 模式保留原来由同一个 action 同时
+改变 fanout 与后台流量的行为。两种模式均不改变 workload、reward、路由和调度权重。
+
 ## 测试边界
 
 - `test_slack_estimation.py`：Slack 公式、queue diagnostics 和配置回归。

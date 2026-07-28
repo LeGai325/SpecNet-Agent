@@ -179,6 +179,14 @@ action 定义和待研究机制，避免一次改动多个变量。分支、测�
 本协作基线整理自本地开发 checkpoint `8cd5988`。此前的个人迭代历史继续保留在本地
 研究工作区中，没有导入这个新仓库。
 
+## Action/background decoupling
+
+Use `--action-coupling decoupled` to separate quality-bearing branch fanout from
+synthetic background traffic. Actions still choose the same branch count, while
+background traffic uses an independent, low-rate scale. The default `legacy`
+mode preserves historical results in which each action jointly changed fanout
+and background volume.
+
 ## License
 
 当前尚未选择开源许可证。添加 License 前，需要由项目负责人确认仓库的共享和发布范围。

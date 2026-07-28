@@ -8,6 +8,20 @@ import unittest
 import specnet_agent_experiment as experiment
 
 
+class FixedActionPolicy(experiment.FIFOPolicy):
+    def __init__(self, action: str) -> None:
+        super().__init__(seed=0)
+        self.action = action
+
+    def decide_action(
+        self,
+        simulator: experiment.Simulator,
+        workflow: experiment.WorkflowRuntime,
+    ) -> str:
+        del simulator, workflow
+        return self.action
+
+
 class QualityAccountingTest(unittest.TestCase):
     def make_spec(self) -> experiment.WorkflowSpec:
         return experiment.WorkflowSpec(
@@ -142,6 +156,74 @@ class QualityAccountingTest(unittest.TestCase):
         optional = [branch for spec in first for branch in spec.branches if not branch.required]
         self.assertTrue(optional)
         self.assertTrue(all(branch.expected_utility > 0.0 for branch in optional))
+
+    def spawned_workflow(
+        self,
+        action: str,
+        coupling: str,
+    ) -> tuple[experiment.Simulator, experiment.WorkflowRuntime]:
+        spec = experiment.generate_workload(91, "medium", 400, 1)[0]
+        simulator = experiment.Simulator(
+            [spec],
+            FixedActionPolicy(action),
+            "medium",
+            91,
+            400,
+            1000,
+            action_coupling=coupling,
+        )
+        workflow = simulator.workflows[spec.workflow_id]
+        simulator.spawn_branches(workflow)
+        return simulator, workflow
+
+    def test_decoupling_changes_background_without_changing_speculation(self) -> None:
+        legacy_sim, legacy = self.spawned_workflow("moderate", "legacy")
+        decoupled_sim, decoupled = self.spawned_workflow("moderate", "decoupled")
+
+        self.assertEqual(len(legacy.branch_flows), len(decoupled.branch_flows))
+        self.assertEqual(
+            len(legacy.speculative_branch_flows),
+            len(decoupled.speculative_branch_flows),
+        )
+        self.assertAlmostEqual(legacy.predicted_quality, decoupled.predicted_quality)
+        legacy_background = sum(legacy_sim.flows[flow_id].size for flow_id in legacy.background_flows)
+        decoupled_background = sum(
+            decoupled_sim.flows[flow_id].size for flow_id in decoupled.background_flows
+        )
+        self.assertGreater(legacy_background, decoupled_background)
+
+    def test_recovery_no_longer_implies_full_background_load(self) -> None:
+        legacy_sim, legacy = self.spawned_workflow("recovery", "legacy")
+        decoupled_sim, decoupled = self.spawned_workflow("recovery", "decoupled")
+
+        legacy_background = sum(legacy_sim.flows[flow_id].size for flow_id in legacy.background_flows)
+        decoupled_background = sum(
+            decoupled_sim.flows[flow_id].size for flow_id in decoupled.background_flows
+        )
+        self.assertAlmostEqual(
+            decoupled_background,
+            legacy_background * experiment.DECOUPLED_BACKGROUND_SCALE["recovery"],
+        )
+
+    def test_conservative_action_can_suppress_background_only(self) -> None:
+        simulator, workflow = self.spawned_workflow("conservative", "decoupled")
+
+        self.assertTrue(workflow.speculative_branch_flows)
+        self.assertFalse(workflow.background_flows)
+        self.assertEqual(simulator.background_scale_for_action("conservative"), 0.0)
+
+    def test_invalid_action_coupling_is_rejected(self) -> None:
+        spec = self.make_spec()
+        with self.assertRaisesRegex(ValueError, "unknown action coupling"):
+            experiment.Simulator(
+                [spec],
+                experiment.FIFOPolicy(),
+                "light",
+                1,
+                10,
+                100,
+                action_coupling="combined",
+            )
 
 
 if __name__ == "__main__":

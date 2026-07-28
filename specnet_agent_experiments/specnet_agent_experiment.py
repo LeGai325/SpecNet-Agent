@@ -78,6 +78,18 @@ ACTION_CONFIG = {
     },
 }
 
+ACTION_COUPLING_MODES = ("legacy", "decoupled")
+DEFAULT_ACTION_COUPLING = "legacy"
+# Background load is an independent traffic-control knob in decoupled mode.
+# Quality-bearing branch fanout remains defined by ACTION_CONFIG.
+DECOUPLED_BACKGROUND_SCALE = {
+    "full": 0.10,
+    "moderate": 0.10,
+    "conservative": 0.00,
+    "critical_only": 0.00,
+    "recovery": 0.10,
+}
+
 
 TEMPLATES = {
     "rag_qa": {
@@ -645,6 +657,7 @@ class Simulator:
         slack_queue_weight: float = DEFAULT_SLACK_QUEUE_WEIGHT,
         network_model: str = "single_bottleneck",
         single_bottleneck_capacity: Optional[float] = None,
+        action_coupling: str = DEFAULT_ACTION_COUPLING,
     ) -> None:
         if slack_queue_basis not in SLACK_QUEUE_BASES:
             raise ValueError(f"unknown Slack queue basis: {slack_queue_basis}")
@@ -656,6 +669,8 @@ class Simulator:
             raise ValueError("single-bottleneck capacity must be positive")
         if network_model != "single_bottleneck" and single_bottleneck_capacity is not None:
             raise ValueError("single-bottleneck capacity only applies to single_bottleneck")
+        if action_coupling not in ACTION_COUPLING_MODES:
+            raise ValueError(f"unknown action coupling mode: {action_coupling}")
         self.specs = list(specs)
         self.policy = policy
         self.load = load
@@ -666,6 +681,7 @@ class Simulator:
         self.slack_queue_basis = slack_queue_basis
         self.slack_queue_weight = slack_queue_weight
         self.network_model = network_model
+        self.action_coupling = action_coupling
         self.capacity = (
             single_bottleneck_capacity
             if single_bottleneck_capacity is not None
@@ -928,6 +944,11 @@ class Simulator:
         smooth_quality = 0.74 + 0.26 * math.log1p(4 * extra_ratio) / math.log1p(4)
         return min(1.0, max(ACTION_CONFIG[action]["quality_floor"], smooth_quality))
 
+    def background_scale_for_action(self, action: str) -> float:
+        if self.action_coupling == "legacy":
+            return float(ACTION_CONFIG[action]["background_scale"])
+        return DECOUPLED_BACKGROUND_SCALE[action]
+
     def spawn_branches(self, workflow: WorkflowRuntime) -> None:
         self.record_slack_decision(workflow)
         action = self.policy.decide_action(self, workflow)
@@ -957,10 +978,10 @@ class Simulator:
             else:
                 workflow.speculative_branch_flows.append(flow_id)
 
-        config = ACTION_CONFIG[action]
-        if config["spawn_background"]:
+        background_scale = self.background_scale_for_action(action)
+        if background_scale > 0.0:
             for size in workflow.spec.background_sizes:
-                scaled_size = max(1.0, size * config["background_scale"])
+                scaled_size = max(1.0, size * background_scale)
                 flow_id = self.new_flow(
                     workflow,
                     "background",
@@ -1342,6 +1363,7 @@ class Simulator:
             "policy": self.policy.name,
             "load": self.load,
             "seed": self.seed,
+            "action_coupling": self.action_coupling,
             "slack_queue_basis": self.slack_queue_basis,
             "slack_queue_weight": self.slack_queue_weight,
             "completed": completed,
@@ -1542,6 +1564,7 @@ def evaluate_training_checkpoint(
     validation_runs: int,
     network_model: str = "single_bottleneck",
     single_bottleneck_capacity: Optional[float] = None,
+    action_coupling: str = DEFAULT_ACTION_COUPLING,
 ) -> Dict[str, object]:
     by_load: Dict[str, List[Dict[str, float]]] = defaultdict(list)
     run_rewards: List[float] = []
@@ -1562,6 +1585,7 @@ def evaluate_training_checkpoint(
                 slack_queue_weight=source.slack_queue_weight,
                 network_model=network_model,
                 single_bottleneck_capacity=single_bottleneck_capacity,
+                action_coupling=action_coupling,
             )
             summary = sim.run()
             rewards = [sim.workflow_reward(workflow) for workflow in sim.completed_workflows]
@@ -1622,6 +1646,7 @@ def train_specnet_agent(
     slack_queue_weight: float = DEFAULT_SLACK_QUEUE_WEIGHT,
     network_model: str = "single_bottleneck",
     single_bottleneck_capacity: Optional[float] = None,
+    action_coupling: str = DEFAULT_ACTION_COUPLING,
 ) -> SpecNetAgentBanditPolicy:
     if episodes <= 0:
         raise ValueError("training episodes must be positive")
@@ -1631,6 +1656,8 @@ def train_specnet_agent(
         raise ValueError("checkpoint evaluation runs must be positive")
     if network_model not in NETWORK_MODELS:
         raise ValueError(f"unknown network model: {network_model}")
+    if action_coupling not in ACTION_COUPLING_MODES:
+        raise ValueError(f"unknown action coupling mode: {action_coupling}")
     policy = SpecNetAgentBanditPolicy(
         seed=seed,
         train=True,
@@ -1669,6 +1696,7 @@ def train_specnet_agent(
             slack_queue_weight=slack_queue_weight,
             network_model=network_model,
             single_bottleneck_capacity=single_bottleneck_capacity,
+            action_coupling=action_coupling,
         )
         training_window.append(sim.run())
         episode_number = episode + 1
@@ -1704,6 +1732,7 @@ def train_specnet_agent(
                 checkpoint_eval_runs,
                 network_model,
                 single_bottleneck_capacity,
+                action_coupling,
             )
         selected_record = max(
             policy.training_checkpoints,
@@ -1740,6 +1769,7 @@ def aggregate_summaries(summaries: List[Dict[str, object]]) -> List[Dict[str, ob
             "quality_weight": items[0].get("quality_weight", ""),
             "slack_queue_basis": items[0].get("slack_queue_basis", ""),
             "slack_queue_weight": items[0].get("slack_queue_weight", ""),
+            "action_coupling": items[0].get("action_coupling", ""),
             "train_seed": items[0].get("train_seed", ""),
             "eval_seed": items[0].get("eval_seed", ""),
             "runs": len(items),
@@ -1917,6 +1947,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional shared-link capacity override for single_bottleneck only (default: 16).",
     )
+    parser.add_argument(
+        "--action-coupling",
+        choices=ACTION_COUPLING_MODES,
+        default=DEFAULT_ACTION_COUPLING,
+        help=(
+            "Use independent background scaling (decoupled), or reproduce the historical "
+            "action-to-background coupling (legacy)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1984,6 +2023,7 @@ def main() -> None:
                     slack_queue_weight=args.slack_queue_weight,
                     network_model=args.network_model,
                     single_bottleneck_capacity=args.single_bottleneck_capacity,
+                    action_coupling=args.action_coupling,
                 )
                 state_features = ",".join(CONTROLLER_VARIANT_FEATURES[controller_variant])
                 training_info = {
@@ -1993,6 +2033,7 @@ def main() -> None:
                     "quality_weight": quality_weight,
                     "slack_queue_basis": args.slack_queue_basis,
                     "slack_queue_weight": args.slack_queue_weight,
+                    "action_coupling": args.action_coupling,
                     "train_seed": train_seed,
                     "eval_seed": eval_seed,
                     "train_episodes": args.train_episodes,
@@ -2068,6 +2109,7 @@ def main() -> None:
                     slack_queue_weight=args.slack_queue_weight,
                     network_model=args.network_model,
                     single_bottleneck_capacity=args.single_bottleneck_capacity,
+                    action_coupling=args.action_coupling,
                 )
                 summary = sim.run()
                 summary["policy"] = policy_name
@@ -2076,6 +2118,7 @@ def main() -> None:
                 summary["quality_weight"] = quality_weight
                 summary["slack_queue_basis"] = args.slack_queue_basis
                 summary["slack_queue_weight"] = args.slack_queue_weight
+                summary["action_coupling"] = args.action_coupling
                 summary["train_seed"] = train_seed
                 summary["eval_seed"] = eval_seed
                 summary["run"] = run_index
@@ -2103,6 +2146,7 @@ def main() -> None:
                             "quality_weight": quality_weight,
                             "slack_queue_basis": args.slack_queue_basis,
                             "slack_queue_weight": args.slack_queue_weight,
+                            "action_coupling": args.action_coupling,
                             "train_seed": train_seed,
                             "eval_seed": eval_seed,
                             "run": run_index,
@@ -2120,6 +2164,7 @@ def main() -> None:
                             "quality_weight": quality_weight,
                             "slack_queue_basis": args.slack_queue_basis,
                             "slack_queue_weight": args.slack_queue_weight,
+                            "action_coupling": args.action_coupling,
                             "train_seed": train_seed,
                             "eval_seed": eval_seed,
                             "run": run_index,
@@ -2175,6 +2220,7 @@ def main() -> None:
         os.path.join(args.output_dir, "specnet_agent_model.json"),
         {
             "network_model": args.network_model,
+            "action_coupling": args.action_coupling,
             **(
                 {"borrowing_enabled": True}
                 if args.network_model == "service_paths_borrowing"

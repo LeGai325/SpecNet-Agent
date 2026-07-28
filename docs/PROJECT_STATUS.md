@@ -1,6 +1,6 @@
 # 当前项目状态
 
-更新时间：2026-07-21
+更新时间：2026-07-28
 
 ## 已实现
 
@@ -19,6 +19,8 @@
   队列压力和借用统计输出。
 - 基于实际 retained optional utility 的 realized quality，以及 useful/unused
   speculative bytes 分离记账。
+- 可选 `decoupled` action 模式将 optional branch fanout 与后台流量独立控制；
+  默认 `legacy` 模式保留用于复现旧实验。
 
 ## 当前默认配置
 
