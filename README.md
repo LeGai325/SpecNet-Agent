@@ -223,6 +223,17 @@ python specnet_plotting/plotting_multi/plot_quality_balance.py \
   --output-dir specnet_plotting/plotting_multi/figures_quality_balance_20260728
 ```
 
+After producing all four modified-SpecNet network runs, generate the full
+1×16/1×48/fixed-3×16/borrowing-3×16 comparison with the original network
+plotting entry point:
+
+```bash
+python specnet_plotting/plotting_multi/plot_specnet_networks.py \
+  --dataset-layout quality_balance \
+  --input-root outputs/quality_balance_20260728 \
+  --output-dir specnet_plotting/plotting_multi/figures_modified_networks_20260728
+```
+
 ## License
 
 当前尚未选择开源许可证。添加 License 前，需要由项目负责人确认仓库的共享和发布范围。

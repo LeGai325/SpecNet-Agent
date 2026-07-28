@@ -22,6 +22,7 @@ specnet_agent_experiments/test_artifacts/
 specnet_plotting/test_artifacts/
 specnet_plotting/plotting_multi/figures/
 specnet_plotting/plotting_multi/figures_quality_balance*/
+specnet_plotting/plotting_multi/figures_modified_networks*/
 
 # Local editor files
 .vscode/

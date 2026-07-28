@@ -28,8 +28,12 @@ class MultiNetworkPlottingTest(unittest.TestCase):
             writer.writeheader()
             writer.writerows(rows)
 
-    def make_input(self, root: Path) -> None:
-        for model, relative in plotting.NETWORK_RELATIVE_DIR.items():
+    def make_input(
+        self,
+        root: Path,
+        relative_dirs=plotting.NETWORK_RELATIVE_DIR,
+    ) -> None:
+        for model, relative in relative_dirs.items():
             directory = root / relative
             summaries = []
             actions = []
@@ -44,7 +48,10 @@ class MultiNetworkPlottingTest(unittest.TestCase):
                             "p99_latency": 20 + load_index + seed_index,
                             "deadline_miss_ratio": 0.01 * load_index,
                             "wasted_speculative_bytes_per_workflow": 30 + load_index + seed_index,
+                            "useful_speculative_bytes_per_workflow": 12 + load_index,
                             "avg_quality": 0.9 - 0.01 * load_index,
+                            "quality_violation_ratio": 0.02 * load_index,
+                            "guard_override_ratio": 0.5,
                         }
                     )
                     actions.append(
@@ -70,7 +77,10 @@ class MultiNetworkPlottingTest(unittest.TestCase):
                         "p99_latency": 999,
                         "deadline_miss_ratio": 1,
                         "wasted_speculative_bytes_per_workflow": 999,
+                        "useful_speculative_bytes_per_workflow": 999,
                         "avg_quality": 1,
+                        "quality_violation_ratio": 1,
+                        "guard_override_ratio": 1,
                     }
                 )
             self.write_csv(directory / "summary_by_run.csv", summaries)
@@ -103,6 +113,29 @@ class MultiNetworkPlottingTest(unittest.TestCase):
         )
         self.assertEqual(conservative["share"], 1.0)
         self.assertEqual(latencies["shared_16"], [7.0, 8.0])
+
+    def test_quality_balance_layout_reads_modified_specnet_results(self) -> None:
+        root = self.artifacts / "quality_balance"
+        self.make_input(root, plotting.QUALITY_BALANCE_NETWORK_RELATIVE_DIR)
+
+        summaries = plotting.aggregate_summary(
+            root,
+            plotting.QUALITY_BALANCE_NETWORK_RELATIVE_DIR,
+        )
+        actions = plotting.aggregate_actions(
+            root,
+            plotting.QUALITY_BALANCE_NETWORK_RELATIVE_DIR,
+        )
+
+        self.assertEqual(len(summaries), 12)
+        self.assertEqual(len(actions), 60)
+        first = next(
+            row
+            for row in summaries
+            if row["network_model"] == "borrowing_paths" and row["load"] == "light"
+        )
+        self.assertEqual(first["quality_violation_ratio"], 0.0)
+        self.assertEqual(first["useful_speculative_bytes_per_workflow"], 12.0)
 
     def test_missing_load_is_rejected(self) -> None:
         root = self.artifacts / "missing"

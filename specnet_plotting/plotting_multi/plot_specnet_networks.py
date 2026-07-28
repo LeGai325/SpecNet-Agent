@@ -60,6 +60,16 @@ NETWORK_RELATIVE_DIR = {
     "fixed_paths": Path("rerun_20260722") / "service_paths_fixed",
     "borrowing_paths": Path("rerun_20260722") / "service_paths_borrowing",
 }
+QUALITY_BALANCE_NETWORK_RELATIVE_DIR = {
+    "shared_16": Path("single16_guard_on"),
+    "shared_48": Path("single48_guard_on"),
+    "fixed_paths": Path("fixed_guard_on"),
+    "borrowing_paths": Path("borrowing_guard_on"),
+}
+NETWORK_LAYOUTS = {
+    "legacy": NETWORK_RELATIVE_DIR,
+    "quality_balance": QUALITY_BALANCE_NETWORK_RELATIVE_DIR,
+}
 
 ACTION_ORDER = ["full", "moderate", "conservative", "critical_only", "recovery"]
 ACTION_LABEL = {
@@ -84,6 +94,11 @@ SUMMARY_METRICS = (
     "wasted_speculative_bytes_per_workflow",
     "avg_quality",
 )
+OPTIONAL_SUMMARY_METRICS = (
+    "quality_violation_ratio",
+    "useful_speculative_bytes_per_workflow",
+    "guard_override_ratio",
+)
 
 
 def read_csv(path: Path) -> List[Dict[str, str]]:
@@ -97,13 +112,19 @@ def is_specnet(policy: str) -> bool:
     return policy == "specnet_agent" or policy.startswith("specnet_agent_")
 
 
-def model_directories(input_root: Path) -> Dict[str, Path]:
-    return {model: input_root / NETWORK_RELATIVE_DIR[model] for model in NETWORK_ORDER}
+def model_directories(
+    input_root: Path,
+    relative_dirs: Mapping[str, Path] = NETWORK_RELATIVE_DIR,
+) -> Dict[str, Path]:
+    return {model: input_root / relative_dirs[model] for model in NETWORK_ORDER}
 
 
-def aggregate_summary(input_root: Path) -> List[Dict[str, object]]:
+def aggregate_summary(
+    input_root: Path,
+    relative_dirs: Mapping[str, Path] = NETWORK_RELATIVE_DIR,
+) -> List[Dict[str, object]]:
     output: List[Dict[str, object]] = []
-    for model, directory in model_directories(input_root).items():
+    for model, directory in model_directories(input_root, relative_dirs).items():
         grouped: Dict[str, List[Dict[str, str]]] = defaultdict(list)
         for row in read_csv(directory / "summary_by_run.csv"):
             if is_specnet(row["policy"]):
@@ -120,13 +141,21 @@ def aggregate_summary(input_root: Path) -> List[Dict[str, object]]:
             }
             for metric in SUMMARY_METRICS:
                 row[metric] = sum(float(item[metric]) for item in grouped[load]) / len(grouped[load])
+            for metric in OPTIONAL_SUMMARY_METRICS:
+                if all(item.get(metric, "") != "" for item in grouped[load]):
+                    row[metric] = sum(float(item[metric]) for item in grouped[load]) / len(
+                        grouped[load]
+                    )
             output.append(row)
     return output
 
 
-def aggregate_actions(input_root: Path) -> List[Dict[str, object]]:
+def aggregate_actions(
+    input_root: Path,
+    relative_dirs: Mapping[str, Path] = NETWORK_RELATIVE_DIR,
+) -> List[Dict[str, object]]:
     output: List[Dict[str, object]] = []
-    for model, directory in model_directories(input_root).items():
+    for model, directory in model_directories(input_root, relative_dirs).items():
         counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
         for row in read_csv(directory / "action_counts.csv"):
             if is_specnet(row["policy"]):
@@ -150,9 +179,13 @@ def aggregate_actions(input_root: Path) -> List[Dict[str, object]]:
     return output
 
 
-def workflow_latencies(input_root: Path, load: str) -> Dict[str, List[float]]:
+def workflow_latencies(
+    input_root: Path,
+    load: str,
+    relative_dirs: Mapping[str, Path] = NETWORK_RELATIVE_DIR,
+) -> Dict[str, List[float]]:
     output: Dict[str, List[float]] = {}
-    for model, directory in model_directories(input_root).items():
+    for model, directory in model_directories(input_root, relative_dirs).items():
         values = [
             float(row["latency"])
             for row in read_csv(directory / "workflow_results.csv")
@@ -189,6 +222,8 @@ def plot_metric_lines(
     dpi: int,
     log_scale: bool = False,
     percent: bool = False,
+    y_limits=None,
+    reference_lines=(),
 ) -> None:
     data = summary_lookup(rows)
     fig, ax = plt.subplots()
@@ -208,7 +243,18 @@ def plot_metric_lines(
         ax.set_yscale("log")
     if percent:
         percent_axis(ax)
-    ax.set_ylim(bottom=0 if not log_scale else None)
+    if y_limits is not None:
+        ax.set_ylim(*y_limits)
+    else:
+        ax.set_ylim(bottom=0 if not log_scale else None)
+    for value, label, linestyle, color in reference_lines:
+        ax.axhline(
+            value,
+            label=label,
+            linestyle=linestyle,
+            color=color,
+            linewidth=1.5,
+        )
     ax.set_ylabel(ylabel)
     ax.set_xlabel("Offered load")
     ax.set_title(title)
@@ -364,6 +410,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--input-root", default=str(default_input))
     parser.add_argument("--output-dir", default=str(default_output))
+    parser.add_argument(
+        "--dataset-layout",
+        choices=tuple(NETWORK_LAYOUTS),
+        default="legacy",
+        help=(
+            "Directory layout under input-root. quality_balance reads the modified "
+            "SpecNet Guard-on experiments without changing the legacy default."
+        ),
+    )
     parser.add_argument("--tradeoff-load", choices=LOAD_ORDER, default="heavy")
     parser.add_argument("--cdf-load", choices=LOAD_ORDER, default="heavy")
     parser.add_argument("--dpi", type=int, default=300)
@@ -374,10 +429,11 @@ def main() -> None:
     args = parse_args()
     input_root = Path(args.input_root).resolve()
     output_dir = str(Path(args.output_dir).resolve())
+    relative_dirs = NETWORK_LAYOUTS[args.dataset_layout]
     setup_style()
-    summaries = aggregate_summary(input_root)
-    actions = aggregate_actions(input_root)
-    latencies = workflow_latencies(input_root, args.cdf_load)
+    summaries = aggregate_summary(input_root, relative_dirs)
+    actions = aggregate_actions(input_root, relative_dirs)
+    latencies = workflow_latencies(input_root, args.cdf_load, relative_dirs)
 
     write_csv(Path(output_dir) / "specnet_network_summary.csv", summaries)
     write_csv(Path(output_dir) / "specnet_action_share.csv", actions)
@@ -401,6 +457,52 @@ def main() -> None:
         args.dpi,
         percent=True,
     )
+    plot_metric_lines(
+        summaries,
+        "avg_quality",
+        "Average realized quality",
+        "Modified SpecNet quality across network models",
+        "fig_modified_specnet_quality_by_network",
+        output_dir,
+        args.dpi,
+        y_limits=(0.78, 0.97),
+        reference_lines=(
+            (0.95, "Q target", "--", "#111827"),
+            (0.90, "Q hard (per workflow)", ":", "#94a3b8"),
+        ),
+    )
+    if all("quality_violation_ratio" in row for row in summaries):
+        plot_metric_lines(
+            summaries,
+            "quality_violation_ratio",
+            "Workflow quality violation ratio",
+            "Modified SpecNet realized quality violations",
+            "fig_modified_specnet_quality_violations_by_network",
+            output_dir,
+            args.dpi,
+            percent=True,
+        )
+    if all("useful_speculative_bytes_per_workflow" in row for row in summaries):
+        plot_metric_lines(
+            summaries,
+            "useful_speculative_bytes_per_workflow",
+            "Useful speculative bytes per workflow",
+            "Modified SpecNet useful speculative traffic",
+            "fig_modified_specnet_useful_speculation_by_network",
+            output_dir,
+            args.dpi,
+        )
+    if all("guard_override_ratio" in row for row in summaries):
+        plot_metric_lines(
+            summaries,
+            "guard_override_ratio",
+            "Safety Guard override ratio",
+            "Modified SpecNet guard activity across network models",
+            "fig_modified_specnet_guard_override_by_network",
+            output_dir,
+            args.dpi,
+            percent=True,
+        )
     plot_waste_bars(summaries, output_dir, args.dpi)
     plot_quality_tradeoff(summaries, args.tradeoff_load, output_dir, args.dpi)
     plot_action_mix(actions, output_dir, args.dpi)
