@@ -21,6 +21,7 @@
   speculative bytes 分离记账。
 - 可选 `decoupled` action 模式将 optional branch fanout 与后台流量独立控制；
   默认 `legacy` 模式保留用于复现旧实验。
+- optional branch 在 planner 完成后按 utility/byte 一次性选入；动态追加和停止延期。
 
 ## 当前默认配置
 

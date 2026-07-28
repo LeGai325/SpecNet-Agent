@@ -933,6 +933,23 @@ class Simulator:
         by_extra = required + int(config["extra_branches"])
         return max(required, min(max_branches, by_fraction, by_extra))
 
+    def branches_for_action(
+        self,
+        workflow: WorkflowRuntime,
+        action: str,
+    ) -> List[BranchSpec]:
+        branch_count = self.branch_count_for_action(workflow, action)
+        required = [branch for branch in workflow.spec.branches if branch.required]
+        optional_slots = max(0, branch_count - len(required))
+        optional = sorted(
+            (branch for branch in workflow.spec.branches if not branch.required),
+            key=lambda branch: (
+                -(branch.expected_utility / max(1e-9, branch.size)),
+                branch.branch_index,
+            ),
+        )
+        return required + optional[:optional_slots]
+
     def quality_for_action(self, workflow: WorkflowRuntime, action: str, branch_count: int) -> float:
         """Estimate quality before execution; realized quality is computed at completion."""
         meta = TEMPLATES[workflow.spec.template]
@@ -953,11 +970,12 @@ class Simulator:
         self.record_slack_decision(workflow)
         action = self.policy.decide_action(self, workflow)
         workflow.action = action
-        branch_count = self.branch_count_for_action(workflow, action)
+        selected_branches = self.branches_for_action(workflow, action)
+        branch_count = len(selected_branches)
         workflow.predicted_quality = self.quality_for_action(workflow, action, branch_count)
         workflow.stage = "branches"
 
-        for index, branch in enumerate(workflow.spec.branches[:branch_count]):
+        for branch in selected_branches:
             required = branch.required
             speculative = not required
             role = "critical_bulk" if required and branch.size >= 32.0 else "critical_control" if required else "speculative"

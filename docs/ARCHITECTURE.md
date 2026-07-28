@@ -138,6 +138,11 @@ path_results.csv
 承载质量收益的 optional branch。默认 `legacy` 模式保留原来由同一个 action 同时
 改变 fanout 与后台流量的行为。两种模式均不改变 workload、reward、路由和调度权重。
 
+Optional branch admission 在 planner 完成后只执行一次。Simulator 始终保留全部
+required branch，并按 `expected_utility / size` 从高到低选择 action 允许数量的
+optional branch；密度相同时按原 `branch_index` 确定顺序。当前版本不会在运行中
+追加、停止或重新选择 branch。
+
 ## 测试边界
 
 - `test_slack_estimation.py`：Slack 公式、queue diagnostics 和配置回归。

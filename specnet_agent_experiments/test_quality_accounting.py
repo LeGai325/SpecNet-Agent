@@ -225,6 +225,80 @@ class QualityAccountingTest(unittest.TestCase):
                 action_coupling="combined",
             )
 
+    def test_one_shot_admission_ranks_optional_branches_by_utility_per_byte(self) -> None:
+        spec = experiment.WorkflowSpec(
+            workflow_id=0,
+            arrival_time=0,
+            template="coding",
+            deadline=100.0,
+            planner_size=1.0,
+            branches=[
+                experiment.BranchSpec("tool", 5.0, True, branch_index=0),
+                experiment.BranchSpec("retrieval", 5.0, True, branch_index=1),
+                experiment.BranchSpec("llm", 5.0, True, branch_index=2),
+                experiment.BranchSpec(
+                    "storage",
+                    100.0,
+                    False,
+                    branch_index=3,
+                    expected_utility=10.0,
+                ),
+                experiment.BranchSpec(
+                    "retrieval",
+                    10.0,
+                    False,
+                    branch_index=4,
+                    expected_utility=2.0,
+                ),
+                experiment.BranchSpec(
+                    "tool",
+                    10.0,
+                    False,
+                    branch_index=5,
+                    expected_utility=1.0,
+                ),
+                experiment.BranchSpec(
+                    "llm",
+                    10.0,
+                    False,
+                    branch_index=6,
+                    expected_utility=0.5,
+                ),
+            ],
+            llm_size=1.0,
+            judge_size=1.0,
+            background_sizes=[],
+        )
+        simulator = experiment.Simulator(
+            [spec],
+            experiment.FIFOPolicy(),
+            "light",
+            1,
+            10,
+            100,
+        )
+        workflow = simulator.workflows[0]
+
+        conservative = simulator.branches_for_action(workflow, "conservative")
+        moderate = simulator.branches_for_action(workflow, "moderate")
+
+        self.assertEqual([branch.branch_index for branch in conservative], [0, 1, 2, 4])
+        self.assertEqual([branch.branch_index for branch in moderate], [0, 1, 2, 4, 3])
+        self.assertTrue(all(branch.required for branch in moderate[:3]))
+
+    def test_utility_ranking_is_deterministic_for_equal_density(self) -> None:
+        simulator, workflow = self.make_simulator()
+        optional = [branch for branch in workflow.spec.branches if not branch.required]
+        optional[0].size = 10.0
+        optional[0].expected_utility = 1.0
+        optional[1].size = 20.0
+        optional[1].expected_utility = 2.0
+
+        selected = simulator.branches_for_action(workflow, "moderate")
+        selected_optional = [branch.branch_index for branch in selected if not branch.required]
+
+        self.assertEqual(selected_optional[:2], [1, 2])
+
 
 if __name__ == "__main__":
     unittest.main()
