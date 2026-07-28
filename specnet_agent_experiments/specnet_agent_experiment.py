@@ -23,6 +23,10 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 ACTIONS = ("full", "moderate", "conservative", "critical_only", "recovery")
 DEFAULT_QUALITY_WEIGHTS = (0.5, 1.0, 1.6, 2.5, 4.0, 6.0)
+DEFAULT_QUALITY_HARD_FLOOR = 0.90
+DEFAULT_LAMBDA_INITIAL = 0.0
+DEFAULT_LAMBDA_LEARNING_RATE = 2.0
+DEFAULT_LAMBDA_MAX = 12.0
 CONTROLLER_VARIANT_FEATURES = {
     "full": ("congestion", "slack", "spec_pressure"),
     "congestion_only": ("congestion",),
@@ -234,6 +238,12 @@ class WorkflowRuntime:
     llm_flow: Optional[int] = None
     judge_flow: Optional[int] = None
     action: Optional[str] = None
+    raw_action: Optional[str] = None
+    safe_action: Optional[str] = None
+    guard_overridden: bool = False
+    override_reason: str = ""
+    quality_constraint_infeasible: bool = False
+    quality_violation: bool = False
     decision_state: Optional[StateKey] = None
     decision_time: Optional[int] = None
     decision_remaining_budget: Optional[float] = None
@@ -383,9 +393,11 @@ class Policy:
     def __init__(self, seed: int = 0) -> None:
         self.rng = random.Random(seed)
         self.action_counter: Counter[str] = Counter()
+        self.raw_action_counter: Counter[str] = Counter()
 
     def reset_for_run(self) -> None:
         self.action_counter.clear()
+        self.raw_action_counter.clear()
 
     def decide_action(self, sim: "Simulator", workflow: WorkflowRuntime) -> str:
         return "full"
@@ -486,7 +498,6 @@ class RuleBasedFeedbackPolicy(CriticalPathOnlyPolicy):
                 action = "moderate"
         else:
             raise ValueError(f"unknown rule profile: {self.profile}")
-        self.action_counter[action] += 1
         return action
 
 
@@ -509,6 +520,11 @@ class SpecNetAgentBanditPolicy(CriticalPathOnlyPolicy):
         learning_rate_min: float = 0.03,
         slack_queue_basis: str = DEFAULT_SLACK_QUEUE_BASIS,
         slack_queue_weight: float = DEFAULT_SLACK_QUEUE_WEIGHT,
+        quality_target: float = DEFAULT_QUALITY_TARGET,
+        quality_hard_floor: float = DEFAULT_QUALITY_HARD_FLOOR,
+        lambda_initial: float = DEFAULT_LAMBDA_INITIAL,
+        lambda_learning_rate: float = DEFAULT_LAMBDA_LEARNING_RATE,
+        lambda_max: float = DEFAULT_LAMBDA_MAX,
     ) -> None:
         super().__init__(seed=seed)
         if controller_variant not in CONTROLLER_VARIANT_FEATURES:
@@ -527,6 +543,12 @@ class SpecNetAgentBanditPolicy(CriticalPathOnlyPolicy):
             raise ValueError(f"unknown Slack queue basis: {slack_queue_basis}")
         if slack_queue_weight < 0.0:
             raise ValueError("Slack queue weight must be non-negative")
+        if not 0.0 <= quality_hard_floor <= quality_target <= 1.0:
+            raise ValueError("quality constraints must satisfy 0 <= hard floor <= target <= 1")
+        if lambda_initial < 0.0 or lambda_learning_rate < 0.0 or lambda_max < 0.0:
+            raise ValueError("lambda parameters must be non-negative")
+        if lambda_initial > lambda_max:
+            raise ValueError("lambda initial value must not exceed lambda max")
         self.name = name
         self.quality_weight = quality_weight
         self.controller_variant = controller_variant
@@ -542,6 +564,12 @@ class SpecNetAgentBanditPolicy(CriticalPathOnlyPolicy):
         self.learning_rate_schedule = learning_rate_schedule
         self.slack_queue_basis = slack_queue_basis
         self.slack_queue_weight = slack_queue_weight
+        self.quality_target = quality_target
+        self.quality_hard_floor = quality_hard_floor
+        self.quality_lagrange_multiplier = lambda_initial
+        self.lambda_learning_rate = lambda_learning_rate
+        self.lambda_max = lambda_max
+        self.lambda_updates: List[Dict[str, object]] = []
         self.train = train
         self.final_training_epsilon = epsilon
         self.selected_checkpoint_episode: Optional[int] = None
@@ -585,7 +613,6 @@ class SpecNetAgentBanditPolicy(CriticalPathOnlyPolicy):
         else:
             q_for_state = self.q_values[state]
             action = max(ACTIONS, key=lambda a: (q_for_state[a], -ACTIONS.index(a)))
-        self.action_counter[action] += 1
         workflow.decision_state = state
         return action
 
@@ -600,6 +627,63 @@ class SpecNetAgentBanditPolicy(CriticalPathOnlyPolicy):
         self.q_values[state][action] = old_value + learning_rate * (reward - old_value)
         self.counts[state][action] += 1
 
+    def update_quality_multiplier(
+        self,
+        load_summaries: Dict[str, Dict[str, object]],
+        episode: int,
+    ) -> None:
+        missing_loads = [
+            load
+            for load, summary in load_summaries.items()
+            if int(summary["completed"]) == 0
+        ]
+        if missing_loads:
+            self.lambda_updates.append(
+                {
+                    "episode": episode,
+                    "quality_by_load": {
+                        load: (
+                            float(summary["avg_quality"])
+                            if int(summary["completed"]) > 0
+                            else None
+                        )
+                        for load, summary in load_summaries.items()
+                    },
+                    "worst_load_quality": "",
+                    "quality_gap": "",
+                    "lambda_before": self.quality_lagrange_multiplier,
+                    "lambda_after": self.quality_lagrange_multiplier,
+                    "updated": False,
+                    "missing_loads": missing_loads,
+                }
+            )
+            return
+        quality_by_load = {
+            load: float(summary["avg_quality"])
+            for load, summary in load_summaries.items()
+        }
+        worst_gap = max(
+            self.quality_target - average_quality
+            for average_quality in quality_by_load.values()
+        )
+        old_multiplier = self.quality_lagrange_multiplier
+        self.quality_lagrange_multiplier = min(
+            self.lambda_max,
+            max(0.0, old_multiplier + self.lambda_learning_rate * worst_gap),
+        )
+        self.lambda_updates.append(
+            {
+                "episode": episode,
+                "quality_by_load": quality_by_load,
+                "worst_load_quality": min(quality_by_load.values()),
+                "quality_gap": worst_gap,
+                "lambda_before": old_multiplier,
+                "lambda_after": self.quality_lagrange_multiplier,
+                "updated": True,
+                "missing_loads": [],
+            }
+        )
+
     def set_evaluation_mode(self) -> None:
         if self.train:
             self.final_training_epsilon = self.epsilon
@@ -610,6 +694,7 @@ class SpecNetAgentBanditPolicy(CriticalPathOnlyPolicy):
         return {
             "q_values": {state: dict(values) for state, values in self.q_values.items()},
             "counts": {state: Counter(values) for state, values in self.counts.items()},
+            "quality_lagrange_multiplier": self.quality_lagrange_multiplier,
         }
 
     def restore_snapshot(self, snapshot: Dict[str, object]) -> None:
@@ -623,11 +708,20 @@ class SpecNetAgentBanditPolicy(CriticalPathOnlyPolicy):
             Counter,
             {state: Counter(values) for state, values in counts.items()},
         )
+        self.quality_lagrange_multiplier = float(
+            snapshot.get("quality_lagrange_multiplier", self.quality_lagrange_multiplier)
+        )
 
     def metadata(self) -> Dict[str, object]:
         return {
             "name": self.name,
             "quality_weight": self.quality_weight,
+            "quality_target": self.quality_target,
+            "quality_hard_floor": self.quality_hard_floor,
+            "quality_lagrange_multiplier": self.quality_lagrange_multiplier,
+            "lambda_learning_rate": self.lambda_learning_rate,
+            "lambda_max": self.lambda_max,
+            "lambda_updates": self.lambda_updates,
             "controller_variant": self.controller_variant,
             "state_features": list(self.state_features),
             "training_schedule": {
@@ -670,11 +764,16 @@ class Simulator:
         network_model: str = "single_bottleneck",
         single_bottleneck_capacity: Optional[float] = None,
         action_coupling: str = DEFAULT_ACTION_COUPLING,
+        quality_target: float = DEFAULT_QUALITY_TARGET,
+        quality_hard_floor: float = DEFAULT_QUALITY_HARD_FLOOR,
+        safety_guard: bool = False,
     ) -> None:
         if slack_queue_basis not in SLACK_QUEUE_BASES:
             raise ValueError(f"unknown Slack queue basis: {slack_queue_basis}")
         if slack_queue_weight < 0.0:
             raise ValueError("Slack queue weight must be non-negative")
+        if not 0.0 <= quality_hard_floor <= quality_target <= 1.0:
+            raise ValueError("quality constraints must satisfy 0 <= hard floor <= target <= 1")
         if network_model not in NETWORK_MODELS:
             raise ValueError(f"unknown network model: {network_model}")
         if single_bottleneck_capacity is not None and single_bottleneck_capacity <= 0.0:
@@ -694,6 +793,9 @@ class Simulator:
         self.slack_queue_weight = slack_queue_weight
         self.network_model = network_model
         self.action_coupling = action_coupling
+        self.quality_target = quality_target
+        self.quality_hard_floor = quality_hard_floor
+        self.safety_guard = safety_guard
         self.capacity = (
             single_bottleneck_capacity
             if single_bottleneck_capacity is not None
@@ -1012,14 +1114,75 @@ class Simulator:
 
     def quality_for_action(self, workflow: WorkflowRuntime, action: str, branch_count: int) -> float:
         """Estimate quality before execution; realized quality is computed at completion."""
-        meta = TEMPLATES[workflow.spec.template]
-        max_branches = meta["max_branches"]
-        required = meta["required_branches"]
-        if max_branches == required:
+        del branch_count
+        optional_specs = [branch for branch in workflow.spec.branches if not branch.required]
+        retain_limit = JUDGE_RETAIN_LIMIT.get(workflow.spec.template, len(optional_specs))
+        potential_utility = sum(
+            sorted(
+                (branch.expected_utility for branch in optional_specs),
+                reverse=True,
+            )[:retain_limit]
+        )
+        if potential_utility <= 1e-12:
             return 1.0
-        extra_ratio = (branch_count - required) / max(1, max_branches - required)
-        smooth_quality = 0.74 + 0.26 * math.log1p(4 * extra_ratio) / math.log1p(4)
-        return min(1.0, max(ACTION_CONFIG[action]["quality_floor"], smooth_quality))
+        selected_optional = [
+            branch
+            for branch in self.branches_for_action(workflow, action)
+            if not branch.required
+        ]
+        selected_utility = sum(
+            sorted(
+                (branch.expected_utility for branch in selected_optional),
+                reverse=True,
+            )[:retain_limit]
+        )
+        retained_fraction = min(1.0, selected_utility / potential_utility)
+        return BASE_REQUIRED_QUALITY + (1.0 - BASE_REQUIRED_QUALITY) * retained_fraction
+
+    def guard_action(
+        self,
+        workflow: WorkflowRuntime,
+        raw_action: str,
+    ) -> Tuple[str, float, bool, str]:
+        predictions = {
+            action: self.quality_for_action(
+                workflow,
+                action,
+                self.branch_count_for_action(workflow, action),
+            )
+            for action in ACTIONS
+        }
+        if not self.safety_guard:
+            return raw_action, predictions[raw_action], False, ""
+        feasible = [
+            action
+            for action in ACTIONS
+            if predictions[action] >= self.quality_hard_floor
+        ]
+        if raw_action in feasible:
+            return raw_action, predictions[raw_action], False, ""
+        if not feasible:
+            safe_action = max(
+                ACTIONS,
+                key=lambda action: (predictions[action], -ACTIONS.index(action)),
+            )
+            return safe_action, predictions[safe_action], True, "quality_constraint_infeasible"
+        if isinstance(self.policy, SpecNetAgentBanditPolicy) and workflow.decision_state is not None:
+            q_values = self.policy.q_values[workflow.decision_state]
+            safe_action = max(
+                feasible,
+                key=lambda action: (q_values[action], -ACTIONS.index(action)),
+            )
+        else:
+            safe_action = min(
+                feasible,
+                key=lambda action: (
+                    predictions[action],
+                    self.branch_count_for_action(workflow, action),
+                    ACTIONS.index(action),
+                ),
+            )
+        return safe_action, predictions[safe_action], False, "predicted_quality_below_hard_floor"
 
     def background_scale_for_action(self, action: str) -> float:
         if self.action_coupling == "legacy":
@@ -1028,11 +1191,21 @@ class Simulator:
 
     def spawn_branches(self, workflow: WorkflowRuntime) -> None:
         self.record_slack_decision(workflow)
-        action = self.policy.decide_action(self, workflow)
+        raw_action = self.policy.decide_action(self, workflow)
+        action, predicted_quality, infeasible, override_reason = self.guard_action(
+            workflow,
+            raw_action,
+        )
+        self.policy.raw_action_counter[raw_action] += 1
+        self.policy.action_counter[action] += 1
+        workflow.raw_action = raw_action
+        workflow.safe_action = action
         workflow.action = action
+        workflow.guard_overridden = raw_action != action
+        workflow.override_reason = override_reason
+        workflow.quality_constraint_infeasible = infeasible
         selected_branches = self.branches_for_action(workflow, action)
-        branch_count = len(selected_branches)
-        workflow.predicted_quality = self.quality_for_action(workflow, action, branch_count)
+        workflow.predicted_quality = predicted_quality
         workflow.stage = "branches"
 
         for branch in selected_branches:
@@ -1159,6 +1332,7 @@ class Simulator:
             workflow.quality = BASE_REQUIRED_QUALITY + (
                 1.0 - BASE_REQUIRED_QUALITY
             ) * retained_fraction
+        workflow.quality_violation = workflow.quality < self.quality_hard_floor
         workflow.quality_accounted = True
 
     def serve_capacity_pool(self, active: List[Flow], capacity: float) -> float:
@@ -1271,12 +1445,17 @@ class Simulator:
         deadline_miss = 1.0 if latency > workflow.spec.deadline else 0.0
         wasted_norm = workflow.wasted_speculative_bytes / max(1.0, sum(b.size for b in workflow.spec.branches))
         quality_loss = 1.0 - workflow.quality
+        quality_gap = max(0.0, self.quality_target - workflow.quality)
+        quality_multiplier = float(
+            getattr(self.policy, "quality_lagrange_multiplier", 0.0)
+        )
         background_norm = workflow.background_bytes_served / max(1.0, sum(workflow.spec.background_sizes))
         return -(
             1.00 * normalized_latency
             + 3.00 * deadline_miss
             + 0.80 * wasted_norm
             + self.quality_weight * quality_loss
+            + quality_multiplier * quality_gap
             + 0.15 * background_norm
         )
 
@@ -1326,9 +1505,17 @@ class Simulator:
                     "predicted_quality": workflow.predicted_quality,
                     "quality": workflow.quality,
                     "quality_target_met": 1
-                    if workflow.quality >= DEFAULT_QUALITY_TARGET
+                    if workflow.quality >= self.quality_target
                     else 0,
                     "action": workflow.action or "none",
+                    "raw_action": workflow.raw_action or "none",
+                    "safe_action": workflow.safe_action or "none",
+                    "guard_overridden": 1 if workflow.guard_overridden else 0,
+                    "override_reason": workflow.override_reason,
+                    "quality_constraint_infeasible": (
+                        1 if workflow.quality_constraint_infeasible else 0
+                    ),
+                    "quality_violation": 1 if workflow.quality_violation else 0,
                     "decision_time": workflow.decision_time if workflow.decision_time is not None else "",
                     "decision_remaining_budget": workflow.decision_remaining_budget
                     if workflow.decision_remaining_budget is not None
@@ -1421,6 +1608,17 @@ class Simulator:
         total_bg = sum(row["background_bytes_served"] for row in records)
         avg_quality = sum(row["quality"] for row in records) / max(1, completed)
         quality_target_ratio = sum(row["quality_target_met"] for row in records) / max(1, completed)
+        quality_violation_ratio = sum(row["quality_violation"] for row in records) / max(
+            1,
+            completed,
+        )
+        guard_override_ratio = sum(row["guard_overridden"] for row in records) / max(
+            1,
+            completed,
+        )
+        infeasible_ratio = sum(
+            row["quality_constraint_infeasible"] for row in records
+        ) / max(1, completed)
         path_records = [
             {
                 "network_model": self.network_model,
@@ -1458,6 +1656,9 @@ class Simulator:
             "load": self.load,
             "seed": self.seed,
             "action_coupling": self.action_coupling,
+            "quality_target": self.quality_target,
+            "quality_hard_floor": self.quality_hard_floor,
+            "safety_guard": "on" if self.safety_guard else "off",
             "slack_queue_basis": self.slack_queue_basis,
             "slack_queue_weight": self.slack_queue_weight,
             "completed": completed,
@@ -1471,9 +1672,13 @@ class Simulator:
             "background_bytes_served_per_workflow": total_bg / max(1, completed),
             "avg_quality": avg_quality,
             "quality_target_met_ratio": quality_target_ratio,
+            "quality_violation_ratio": quality_violation_ratio,
+            "guard_override_ratio": guard_override_ratio,
+            "quality_constraint_infeasible_ratio": infeasible_ratio,
             "link_utilization": self.total_served / max(1.0, self.total_capacity),
             "avg_queue_pressure": statistics.mean(self.queue_pressure_samples) if self.queue_pressure_samples else 0.0,
             "action_counts": dict(self.policy.action_counter),
+            "raw_action_counts": dict(self.policy.raw_action_counter),
             "workflow_records": records,
             "path_records": path_records,
             "path_borrowing_records": path_borrowing_records,
@@ -1589,6 +1794,7 @@ def serialize_model_snapshot(snapshot: Dict[str, object]) -> Dict[str, object]:
     return {
         "q_values": {str(state): dict(values) for state, values in q_values.items()},
         "counts": {str(state): dict(values) for state, values in counts.items()},
+        "quality_lagrange_multiplier": snapshot.get("quality_lagrange_multiplier", 0.0),
     }
 
 
@@ -1607,6 +1813,9 @@ def summarize_training_window(summaries: List[Dict[str, object]]) -> Dict[str, o
         "unused_speculative_bytes_per_workflow",
         "avg_quality",
         "quality_target_met_ratio",
+        "quality_violation_ratio",
+        "guard_override_ratio",
+        "quality_constraint_infeasible_ratio",
     )
     return {
         "episodes": len(summaries),
@@ -1641,6 +1850,11 @@ def policy_from_snapshot(
         learning_rate_min=source.learning_rate_min,
         slack_queue_basis=source.slack_queue_basis,
         slack_queue_weight=source.slack_queue_weight,
+        quality_target=source.quality_target,
+        quality_hard_floor=source.quality_hard_floor,
+        lambda_initial=source.quality_lagrange_multiplier,
+        lambda_learning_rate=source.lambda_learning_rate,
+        lambda_max=source.lambda_max,
     )
     policy.restore_snapshot(snapshot)
     policy.set_evaluation_mode()
@@ -1659,6 +1873,9 @@ def evaluate_training_checkpoint(
     network_model: str = "single_bottleneck",
     single_bottleneck_capacity: Optional[float] = None,
     action_coupling: str = DEFAULT_ACTION_COUPLING,
+    quality_target: float = DEFAULT_QUALITY_TARGET,
+    quality_hard_floor: float = DEFAULT_QUALITY_HARD_FLOOR,
+    safety_guard: bool = False,
 ) -> Dict[str, object]:
     by_load: Dict[str, List[Dict[str, float]]] = defaultdict(list)
     run_rewards: List[float] = []
@@ -1680,6 +1897,9 @@ def evaluate_training_checkpoint(
                 network_model=network_model,
                 single_bottleneck_capacity=single_bottleneck_capacity,
                 action_coupling=action_coupling,
+                quality_target=quality_target,
+                quality_hard_floor=quality_hard_floor,
+                safety_guard=safety_guard,
             )
             summary = sim.run()
             rewards = [sim.workflow_reward(workflow) for workflow in sim.completed_workflows]
@@ -1698,20 +1918,35 @@ def evaluate_training_checkpoint(
                     ),
                     "avg_quality": float(summary["avg_quality"]),
                     "quality_target_met_ratio": float(summary["quality_target_met_ratio"]),
+                    "quality_violation_ratio": float(summary["quality_violation_ratio"]),
                 }
             )
 
+    load_metrics = {
+        load: {
+            metric: statistics.mean(item[metric] for item in items)
+            for metric in items[0]
+        }
+        for load, items in sorted(by_load.items())
+    }
+    max_quality_gap = max(
+        max(0.0, quality_target - float(metrics["avg_quality"]))
+        for metrics in load_metrics.values()
+    )
+    max_violation_ratio = max(
+        float(metrics["quality_violation_ratio"])
+        for metrics in load_metrics.values()
+    )
     return {
         "score": statistics.mean(run_rewards),
         "seed": validation_seed,
         "runs_per_load": validation_runs,
-        "loads": {
-            load: {
-                metric: statistics.mean(item[metric] for item in items)
-                for metric in items[0]
-            }
-            for load, items in sorted(by_load.items())
-        },
+        "quality_target": quality_target,
+        "quality_hard_floor": quality_hard_floor,
+        "constraint_feasible": max_quality_gap <= 1e-12 and max_violation_ratio <= 1e-12,
+        "max_quality_gap": max_quality_gap,
+        "max_quality_violation_ratio": max_violation_ratio,
+        "loads": load_metrics,
     }
 
 
@@ -1741,6 +1976,12 @@ def train_specnet_agent(
     network_model: str = "single_bottleneck",
     single_bottleneck_capacity: Optional[float] = None,
     action_coupling: str = DEFAULT_ACTION_COUPLING,
+    quality_target: float = DEFAULT_QUALITY_TARGET,
+    quality_hard_floor: float = DEFAULT_QUALITY_HARD_FLOOR,
+    safety_guard: bool = False,
+    lambda_initial: float = DEFAULT_LAMBDA_INITIAL,
+    lambda_learning_rate: float = DEFAULT_LAMBDA_LEARNING_RATE,
+    lambda_max: float = DEFAULT_LAMBDA_MAX,
 ) -> SpecNetAgentBanditPolicy:
     if episodes <= 0:
         raise ValueError("training episodes must be positive")
@@ -1767,11 +2008,17 @@ def train_specnet_agent(
         learning_rate_min=learning_rate_min,
         slack_queue_basis=slack_queue_basis,
         slack_queue_weight=slack_queue_weight,
+        quality_target=quality_target,
+        quality_hard_floor=quality_hard_floor,
+        lambda_initial=lambda_initial,
+        lambda_learning_rate=lambda_learning_rate,
+        lambda_max=lambda_max,
     )
     requested_checkpoints = checkpoint_episodes or []
     checkpoints = sorted({episode for episode in requested_checkpoints if episode <= episodes} | {episodes})
     checkpoint_models: Dict[int, Dict[str, object]] = {}
     training_window: List[Dict[str, object]] = []
+    constraint_window: Dict[str, Dict[str, object]] = {}
     window_start_episode = 1
     for episode in range(episodes):
         policy.set_training_progress(episode, episodes)
@@ -1791,9 +2038,17 @@ def train_specnet_agent(
             network_model=network_model,
             single_bottleneck_capacity=single_bottleneck_capacity,
             action_coupling=action_coupling,
+            quality_target=quality_target,
+            quality_hard_floor=quality_hard_floor,
+            safety_guard=safety_guard,
         )
-        training_window.append(sim.run())
+        episode_summary = sim.run()
+        training_window.append(episode_summary)
+        constraint_window[load] = episode_summary
         episode_number = episode + 1
+        if len(constraint_window) == len(loads):
+            policy.update_quality_multiplier(constraint_window, episode_number)
+            constraint_window = {}
         if episode_number in checkpoints:
             snapshot = policy.model_snapshot()
             checkpoint_models[episode_number] = snapshot
@@ -1827,11 +2082,29 @@ def train_specnet_agent(
                 network_model,
                 single_bottleneck_capacity,
                 action_coupling,
+                quality_target,
+                quality_hard_floor,
+                safety_guard,
             )
-        selected_record = max(
-            policy.training_checkpoints,
-            key=lambda record: float(record["validation"]["score"]),
-        )
+        feasible_records = [
+            record
+            for record in policy.training_checkpoints
+            if bool(record["validation"]["constraint_feasible"])
+        ]
+        if feasible_records:
+            selected_record = max(
+                feasible_records,
+                key=lambda record: float(record["validation"]["score"]),
+            )
+        else:
+            selected_record = min(
+                policy.training_checkpoints,
+                key=lambda record: (
+                    float(record["validation"]["max_quality_gap"]),
+                    float(record["validation"]["max_quality_violation_ratio"]),
+                    -float(record["validation"]["score"]),
+                ),
+            )
         selected_episode = int(selected_record["episode"])
 
     policy.restore_snapshot(checkpoint_models[selected_episode])
@@ -1843,6 +2116,18 @@ def train_specnet_agent(
         "selected_checkpoint_episode": selected_episode,
         "validation_seed": validation_seed if checkpoint_selection == "best_validation" else None,
         "checkpoint_eval_runs": checkpoint_eval_runs if checkpoint_selection == "best_validation" else 0,
+        "quality_target": quality_target,
+        "quality_hard_floor": quality_hard_floor,
+        "safety_guard": "on" if safety_guard else "off",
+        "lambda_initial": lambda_initial,
+        "lambda_learning_rate": lambda_learning_rate,
+        "lambda_max": lambda_max,
+        "lambda_updates": policy.lambda_updates,
+        "selected_checkpoint_constraint_feasible": (
+            bool(selected_record["validation"]["constraint_feasible"])
+            if checkpoint_selection == "best_validation"
+            else None
+        ),
     }
     policy.set_evaluation_mode()
     return policy
@@ -1864,6 +2149,9 @@ def aggregate_summaries(summaries: List[Dict[str, object]]) -> List[Dict[str, ob
             "slack_queue_basis": items[0].get("slack_queue_basis", ""),
             "slack_queue_weight": items[0].get("slack_queue_weight", ""),
             "action_coupling": items[0].get("action_coupling", ""),
+            "quality_target": items[0].get("quality_target", ""),
+            "quality_hard_floor": items[0].get("quality_hard_floor", ""),
+            "safety_guard": items[0].get("safety_guard", ""),
             "train_seed": items[0].get("train_seed", ""),
             "eval_seed": items[0].get("eval_seed", ""),
             "runs": len(items),
@@ -1880,6 +2168,9 @@ def aggregate_summaries(summaries: List[Dict[str, object]]) -> List[Dict[str, ob
             "background_bytes_served_per_workflow",
             "avg_quality",
             "quality_target_met_ratio",
+            "quality_violation_ratio",
+            "guard_override_ratio",
+            "quality_constraint_infeasible_ratio",
             "link_utilization",
             "avg_queue_pressure",
         ]
@@ -2050,6 +2341,42 @@ def parse_args() -> argparse.Namespace:
             "action-to-background coupling (legacy)."
         ),
     )
+    parser.add_argument(
+        "--quality-target",
+        type=float,
+        default=DEFAULT_QUALITY_TARGET,
+        help="Fixed service-level average quality target; validation does not select it.",
+    )
+    parser.add_argument(
+        "--quality-hard-floor",
+        type=float,
+        default=DEFAULT_QUALITY_HARD_FLOOR,
+        help="Per-workflow quality floor enforced by the optional Safety Guard.",
+    )
+    parser.add_argument(
+        "--safety-guard",
+        choices=("off", "on"),
+        default="off",
+        help="Apply the per-workflow predicted-quality guard before executing an action.",
+    )
+    parser.add_argument(
+        "--lambda-initial",
+        type=float,
+        default=DEFAULT_LAMBDA_INITIAL,
+        help="Initial Lagrange multiplier for average-quality constraint violations.",
+    )
+    parser.add_argument(
+        "--lambda-learning-rate",
+        type=float,
+        default=DEFAULT_LAMBDA_LEARNING_RATE,
+        help="Window-level Lagrange multiplier update rate.",
+    )
+    parser.add_argument(
+        "--lambda-max",
+        type=float,
+        default=DEFAULT_LAMBDA_MAX,
+        help="Upper bound for the quality Lagrange multiplier.",
+    )
     return parser.parse_args()
 
 
@@ -2070,6 +2397,15 @@ def main() -> None:
         raise SystemExit(f"Invalid loads: {invalid_loads}")
     if args.slack_queue_weight < 0.0:
         raise SystemExit("--slack-queue-weight must be non-negative")
+    if not 0.0 <= args.quality_hard_floor <= args.quality_target <= 1.0:
+        raise SystemExit(
+            "quality constraints must satisfy 0 <= --quality-hard-floor "
+            "<= --quality-target <= 1"
+        )
+    if args.lambda_initial < 0.0 or args.lambda_learning_rate < 0.0 or args.lambda_max < 0.0:
+        raise SystemExit("lambda parameters must be non-negative")
+    if args.lambda_initial > args.lambda_max:
+        raise SystemExit("--lambda-initial must not exceed --lambda-max")
     if args.single_bottleneck_capacity is not None:
         if args.single_bottleneck_capacity <= 0.0:
             raise SystemExit("--single-bottleneck-capacity must be positive")
@@ -2079,8 +2415,10 @@ def main() -> None:
             )
 
     os.makedirs(args.output_dir, exist_ok=True)
+    safety_guard = args.safety_guard == "on"
     trained_policies: Dict[str, Tuple[float, int, str, SpecNetAgentBanditPolicy]] = {}
     trained_agent_rows: List[Dict[str, object]] = []
+    lambda_update_rows: List[Dict[str, object]] = []
     for train_seed in train_seeds:
         for quality_weight in quality_weights:
             for controller_variant in controller_variants:
@@ -2118,6 +2456,12 @@ def main() -> None:
                     network_model=args.network_model,
                     single_bottleneck_capacity=args.single_bottleneck_capacity,
                     action_coupling=args.action_coupling,
+                    quality_target=args.quality_target,
+                    quality_hard_floor=args.quality_hard_floor,
+                    safety_guard=safety_guard,
+                    lambda_initial=args.lambda_initial,
+                    lambda_learning_rate=args.lambda_learning_rate,
+                    lambda_max=args.lambda_max,
                 )
                 state_features = ",".join(CONTROLLER_VARIANT_FEATURES[controller_variant])
                 training_info = {
@@ -2128,6 +2472,16 @@ def main() -> None:
                     "slack_queue_basis": args.slack_queue_basis,
                     "slack_queue_weight": args.slack_queue_weight,
                     "action_coupling": args.action_coupling,
+                    "quality_target": args.quality_target,
+                    "quality_hard_floor": args.quality_hard_floor,
+                    "safety_guard": args.safety_guard,
+                    "lambda_initial": args.lambda_initial,
+                    "lambda_learning_rate": args.lambda_learning_rate,
+                    "lambda_max": args.lambda_max,
+                    "quality_lagrange_multiplier": policy.quality_lagrange_multiplier,
+                    "selected_checkpoint_constraint_feasible": policy.training_info.get(
+                        "selected_checkpoint_constraint_feasible"
+                    ),
                     "train_seed": train_seed,
                     "eval_seed": eval_seed,
                     "train_episodes": args.train_episodes,
@@ -2159,6 +2513,30 @@ def main() -> None:
                 }
                 trained_policies[policy_name] = (quality_weight, train_seed, controller_variant, policy)
                 trained_agent_rows.append(training_info)
+                for update in policy.lambda_updates:
+                    quality_by_load = update["quality_by_load"]
+                    lambda_update_rows.append(
+                        {
+                            "policy": policy_name,
+                            "controller_variant": controller_variant,
+                            "quality_weight": quality_weight,
+                            "train_seed": train_seed,
+                            "network_model": args.network_model,
+                            "action_coupling": args.action_coupling,
+                            "safety_guard": args.safety_guard,
+                            "quality_target": args.quality_target,
+                            "episode": update["episode"],
+                            "updated": update["updated"],
+                            "missing_loads": ",".join(update["missing_loads"]),
+                            "light_avg_quality": quality_by_load.get("light", ""),
+                            "medium_avg_quality": quality_by_load.get("medium", ""),
+                            "heavy_avg_quality": quality_by_load.get("heavy", ""),
+                            "worst_load_quality": update["worst_load_quality"],
+                            "quality_gap": update["quality_gap"],
+                            "lambda_before": update["lambda_before"],
+                            "lambda_after": update["lambda_after"],
+                        }
+                    )
 
     policies = [
         "fifo",
@@ -2172,6 +2550,7 @@ def main() -> None:
     summaries: List[Dict[str, object]] = []
     workflow_rows: List[Dict[str, object]] = []
     action_rows: List[Dict[str, object]] = []
+    raw_action_rows: List[Dict[str, object]] = []
     path_rows: List[Dict[str, object]] = []
     path_borrowing_rows: List[Dict[str, object]] = []
 
@@ -2204,6 +2583,9 @@ def main() -> None:
                     network_model=args.network_model,
                     single_bottleneck_capacity=args.single_bottleneck_capacity,
                     action_coupling=args.action_coupling,
+                    quality_target=args.quality_target,
+                    quality_hard_floor=args.quality_hard_floor,
+                    safety_guard=safety_guard,
                 )
                 summary = sim.run()
                 summary["policy"] = policy_name
@@ -2213,6 +2595,9 @@ def main() -> None:
                 summary["slack_queue_basis"] = args.slack_queue_basis
                 summary["slack_queue_weight"] = args.slack_queue_weight
                 summary["action_coupling"] = args.action_coupling
+                summary["quality_target"] = args.quality_target
+                summary["quality_hard_floor"] = args.quality_hard_floor
+                summary["safety_guard"] = args.safety_guard
                 summary["train_seed"] = train_seed
                 summary["eval_seed"] = eval_seed
                 summary["run"] = run_index
@@ -2224,6 +2609,7 @@ def main() -> None:
                         not in (
                             "workflow_records",
                             "action_counts",
+                            "raw_action_counts",
                             "path_records",
                             "path_borrowing_records",
                         )
@@ -2241,6 +2627,9 @@ def main() -> None:
                             "slack_queue_basis": args.slack_queue_basis,
                             "slack_queue_weight": args.slack_queue_weight,
                             "action_coupling": args.action_coupling,
+                            "quality_target": args.quality_target,
+                            "quality_hard_floor": args.quality_hard_floor,
+                            "safety_guard": args.safety_guard,
                             "train_seed": train_seed,
                             "eval_seed": eval_seed,
                             "run": run_index,
@@ -2259,6 +2648,30 @@ def main() -> None:
                             "slack_queue_basis": args.slack_queue_basis,
                             "slack_queue_weight": args.slack_queue_weight,
                             "action_coupling": args.action_coupling,
+                            "quality_target": args.quality_target,
+                            "quality_hard_floor": args.quality_hard_floor,
+                            "safety_guard": args.safety_guard,
+                            "train_seed": train_seed,
+                            "eval_seed": eval_seed,
+                            "run": run_index,
+                            "action": action,
+                            "count": count,
+                        }
+                    )
+                for action, count in summary["raw_action_counts"].items():
+                    raw_action_rows.append(
+                        {
+                            "load": load,
+                            "policy": policy_name,
+                            "controller_variant": controller_variant,
+                            "state_features": state_features,
+                            "quality_weight": quality_weight,
+                            "slack_queue_basis": args.slack_queue_basis,
+                            "slack_queue_weight": args.slack_queue_weight,
+                            "action_coupling": args.action_coupling,
+                            "quality_target": args.quality_target,
+                            "quality_hard_floor": args.quality_hard_floor,
+                            "safety_guard": args.safety_guard,
                             "train_seed": train_seed,
                             "eval_seed": eval_seed,
                             "run": run_index,
@@ -2304,7 +2717,9 @@ def main() -> None:
     write_csv(os.path.join(args.output_dir, "summary_aggregate.csv"), aggregate_rows)
     write_csv(os.path.join(args.output_dir, "workflow_results.csv"), workflow_rows)
     write_csv(os.path.join(args.output_dir, "action_counts.csv"), action_rows)
+    write_csv(os.path.join(args.output_dir, "raw_action_counts.csv"), raw_action_rows)
     write_csv(os.path.join(args.output_dir, "trained_agents.csv"), trained_agent_rows)
+    write_csv(os.path.join(args.output_dir, "lambda_updates.csv"), lambda_update_rows)
     write_csv(os.path.join(args.output_dir, "path_results.csv"), path_rows)
     write_csv(
         os.path.join(args.output_dir, "path_borrowing_results.csv"),
@@ -2315,6 +2730,16 @@ def main() -> None:
         {
             "network_model": args.network_model,
             "action_coupling": args.action_coupling,
+            "quality_constraints": {
+                "quality_target": args.quality_target,
+                "quality_hard_floor": args.quality_hard_floor,
+                "safety_guard": args.safety_guard,
+                "target_selected_by_validation": False,
+                "lambda_initial": args.lambda_initial,
+                "lambda_learning_rate": args.lambda_learning_rate,
+                "lambda_max": args.lambda_max,
+                "lambda_update_window": "one_complete_load_cycle",
+            },
             **(
                 {"borrowing_enabled": True}
                 if args.network_model == "service_paths_borrowing"

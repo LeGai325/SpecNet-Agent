@@ -127,7 +127,9 @@ summary_by_run.csv
 summary_aggregate.csv
 workflow_results.csv
 action_counts.csv
+raw_action_counts.csv
 trained_agents.csv
+lambda_updates.csv
 specnet_agent_model.json
 path_results.csv
 ```
@@ -148,6 +150,27 @@ Optional branch admission 在 planner 完成后只执行一次。Simulator 始�
 required branch，并按 `expected_utility / size` 从高到低选择 action 允许数量的
 optional branch；密度相同时按原 `branch_index` 确定顺序。当前版本不会在运行中
 追加、停止或重新选择 branch。
+
+### 质量约束与 Safety Guard
+
+`Q_target=0.95` 是预先规定的服务级平均目标，`Q_hard=0.90` 是单 workflow
+硬下限。validation 只能选择超参数和 checkpoint，不能改变目标。Bandit Q 值仍按
+workflow 完成结果更新；拉格朗日乘子只在 light、medium、heavy 各完成一个 episode
+后更新一次：
+
+$$
+g_k=\max_{\ell}\left(Q_{\mathrm{target}}-\overline{Q}_{k,\ell}\right)
+$$
+
+$$
+\lambda_{k+1}=\operatorname{clip}
+\left(\lambda_k+\eta_\lambda g_k,0,\lambda_{\max}\right)
+$$
+
+Safety Guard 在动作执行前检查 expected optional utility 对应的 predicted quality。
+低于 `Q_hard` 的 raw action 被替换为可行动作；若不存在可行动作，则选择 predicted
+quality 最高的动作并记录 `quality_constraint_infeasible`。实际完成质量低于硬下限
+记为不可由未来 workflow 补偿的 `quality_violation`，不称为 quality debt。
 
 ## 测试边界
 

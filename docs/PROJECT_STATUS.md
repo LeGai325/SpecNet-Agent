@@ -24,6 +24,9 @@
 - optional branch 在 planner 完成后按 utility/byte 一次性选入；动态追加和停止延期。
 - 新增 `path_aware_quality` controller variant，以 required path pressure 和
   optional headroom 表达多路径状态；原有 controller variant 保持兼容。
+- 固定平均质量目标 0.95 和单 workflow 硬下限 0.90；新增动作前 Safety Guard、
+  完整负载周期级 λ 更新、约束感知 checkpoint 选择及 Rule/Bandit × Guard 2×2 输出。
+- 渐进式 speculation admission、运行中追加与停止 branch 仍明确延期。
 
 ## 当前默认配置
 

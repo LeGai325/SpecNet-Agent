@@ -187,6 +187,33 @@ background traffic uses an independent, low-rate scale. The default `legacy`
 mode preserves historical results in which each action jointly changed fanout
 and background volume.
 
+## Multi-path quality constraints
+
+The quality-balance controller keeps the service target fixed before training:
+
+```text
+Q_target = 0.95
+Q_hard   = 0.90
+```
+
+Validation may select hyperparameters and checkpoints, but never changes these
+targets. Enable the compact path-aware state and Safety Guard with:
+
+```bash
+python specnet_agent_experiments/specnet_agent_experiment.py \
+  --network-model service_paths_borrowing \
+  --action-coupling decoupled \
+  --controller-variants path_aware_quality \
+  --quality-target 0.95 \
+  --quality-hard-floor 0.90 \
+  --safety-guard on
+```
+
+Run the same command once with `--safety-guard off` and once with `on`.
+`rule_balanced` and `specnet_agent_path_aware_quality` from the two runs form the
+Rule/Bandit × Guard off/on 2×2 ablation. `lambda_updates.csv` records one
+Lagrange-multiplier update per complete load cycle.
+
 ## License
 
 当前尚未选择开源许可证。添加 License 前，需要由项目负责人确认仓库的共享和发布范围。
