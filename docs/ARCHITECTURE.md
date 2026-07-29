@@ -65,7 +65,7 @@ recovery
 当前 `Simulator.serve_active_flows()` 使用 weighted max-min 风格的容量分配。
 `Policy.flow_weight()` 返回的权重只是 QoS proxy，不是真实硬件队列。
 
-Simulator 支持两个网络模型：
+Simulator 支持三个网络模型：
 
 - `single_bottleneck`：默认模型，所有 flow 共享一条容量为 16 的 `shared` 路径。
 - `service_paths`：`planner/judge -> control`、
@@ -132,6 +132,7 @@ trained_agents.csv
 lambda_updates.csv
 specnet_agent_model.json
 path_results.csv
+path_borrowing_results.csv
 ```
 
 `path_results.csv` 记录逐路径容量、served、利用率和平均队列压力。历史

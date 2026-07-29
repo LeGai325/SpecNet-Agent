@@ -1,6 +1,6 @@
 # 当前项目状态
 
-更新时间：2026-07-28
+更新时间：2026-07-30
 
 ## 已实现
 
@@ -25,7 +25,7 @@
 - 新增 `path_aware_quality` controller variant，以 required path pressure 和
   optional headroom 表达多路径状态；原有 controller variant 保持兼容。
 - 固定平均质量目标 0.95 和单 workflow 硬下限 0.90；新增动作前 Safety Guard、
-  完整负载周期级 λ 更新、约束感知 checkpoint 选择及 Rule/Bandit × Guard 2×2 输出。
+  完整负载周期级 λ 更新、约束感知 checkpoint 选择及 SpecNet Guard off/on 消融输出。
 - 渐进式 speculation admission、运行中追加与停止 branch 仍明确延期。
 
 ## 当前默认配置
@@ -43,8 +43,9 @@
 - `no_source_control` 尚未实现为严格开关，目前由 `critical_path_only` 代理。
 - `no_learning` 尚未实现为严格开关，目前由 `rule_balanced` 代理。
 - Speculative-pressure、真实源端控制和 QoS 队列模块仍需与其他开发者代码合并。
-- `service_paths` 只隔离调度容量；Controller congestion、Slack 和 speculative pressure
-  仍是全局聚合状态，尚未实现 path-aware state。
+- `service_paths` 只隔离调度容量；旧 Controller variant 的 congestion、Slack 和
+  speculative pressure 仍是全局聚合状态。可选 `path_aware_quality` 已补充紧凑的
+  required path pressure 和 optional headroom，但尚未把所有旧状态改为逐路径版本。
 - `service_paths_borrowing` 只共享当前周期的剩余容量，不实现动态最短队列选路、flow
   迁移或逐跳路径。
 - 服务逻辑路径不是逐跳拓扑，不包含共享核心、ECMP 或路由变化。
