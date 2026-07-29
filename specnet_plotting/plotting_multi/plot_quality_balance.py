@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot the multi-path quality-balance ablation and network comparisons."""
+"""Plot the SpecNet Guard ablation and multi-path network comparisons."""
 
 from __future__ import annotations
 
@@ -47,24 +47,23 @@ ACTION_COLOR = {
     "recovery": "#8b5cf6",
 }
 
-MECHANISM_ORDER = ["rule_off", "rule_on", "bandit_off", "bandit_on"]
+MECHANISM_ORDER = ["bandit_off", "bandit_on"]
 MECHANISM_LABEL = {
-    "rule_off": "Rule",
-    "rule_on": "Rule + Guard",
-    "bandit_off": "Bandit",
-    "bandit_on": "Bandit + Guard",
+    "bandit_off": "SpecNet · Guard off",
+    "bandit_on": "SpecNet · Guard on",
 }
 MECHANISM_COLOR = {
-    "rule_off": "#64748b",
-    "rule_on": "#2563eb",
     "bandit_off": "#f59e0b",
     "bandit_on": "#059669",
 }
 MECHANISM_MARKER = {
-    "rule_off": "o",
-    "rule_on": "^",
     "bandit_off": "s",
     "bandit_on": "P",
+}
+GUARD_ORDER = ["off", "on"]
+GUARD_LABEL = {
+    "off": "Guard off",
+    "on": "Guard on",
 }
 
 NETWORK_ORDER = ["shared48", "fixed_paths", "borrowing_paths"]
@@ -143,8 +142,6 @@ def mean_rows(
 def aggregate_mechanisms(input_root: Path) -> List[Dict[str, object]]:
     output: List[Dict[str, object]] = []
     definitions = (
-        ("rule_off", "borrowing_guard_off", lambda row: row["policy"] == "rule_balanced"),
-        ("rule_on", "borrowing_guard_on", lambda row: row["policy"] == "rule_balanced"),
         ("bandit_off", "borrowing_guard_off", lambda row: is_specnet(row["policy"])),
         ("bandit_on", "borrowing_guard_on", lambda row: is_specnet(row["policy"])),
     )
@@ -173,24 +170,23 @@ def aggregate_networks(input_root: Path) -> List[Dict[str, object]]:
 
 
 def aggregate_guard_actions(input_root: Path) -> List[Dict[str, object]]:
-    directory = input_root / "borrowing_guard_on"
     output: List[Dict[str, object]] = []
-    for stage, filename in (
-        ("raw", "raw_action_counts.csv"),
-        ("safe", "action_counts.csv"),
+    for guard, directory in (
+        ("off", "borrowing_guard_off"),
+        ("on", "borrowing_guard_on"),
     ):
         counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
-        for row in read_csv(directory / filename):
+        for row in read_csv(input_root / directory / "action_counts.csv"):
             if is_specnet(row["policy"]):
                 counts[row["load"]][row["action"]] += int(row["count"])
         for load in LOAD_ORDER:
             total = sum(counts[load].values())
             if total == 0:
-                raise ValueError(f"{stage} actions missing for load: {load}")
+                raise ValueError(f"Guard {guard} actions missing for load: {load}")
             for action in ACTION_ORDER:
                 output.append(
                     {
-                        "stage": stage,
+                        "guard": guard,
                         "load": load,
                         "action": action,
                         "count": counts[load][action],
@@ -295,21 +291,14 @@ def paired_evidence(input_root: Path) -> List[Dict[str, object]]:
     on = read_csv(input_root / "borrowing_guard_on" / "summary_by_run.csv")
     fixed = read_csv(input_root / "fixed_guard_on" / "summary_by_run.csv")
     shared = read_csv(input_root / "single48_guard_on" / "summary_by_run.csv")
-    evidence: List[Dict[str, object]] = []
-    for family, predicate in (
-        ("Rule", lambda row: row["policy"] == "rule_balanced"),
-        ("Bandit", lambda row: is_specnet(row["policy"])),
-    ):
-        evidence.extend(
-            paired_comparison(
-                [row for row in off if predicate(row)],
-                [row for row in on if predicate(row)],
-                f"{family}: Guard off -> on",
-                "Guard off",
-                "Guard on",
-                rng,
-            )
-        )
+    evidence = paired_comparison(
+        [row for row in off if is_specnet(row["policy"])],
+        [row for row in on if is_specnet(row["policy"])],
+        "SpecNet: Guard off -> on",
+        "Guard off",
+        "Guard on",
+        rng,
+    )
     for comparison, left_rows, left_label in (
         ("Bandit + Guard: Fixed -> Borrowing", fixed, "Fixed 3x16"),
         ("Bandit + Guard: Shared48 -> Borrowing", shared, "Shared 1x48"),
@@ -440,7 +429,7 @@ def plot_guard_actions(
     dpi: int,
 ) -> None:
     shares = {
-        (str(row["stage"]), str(row["load"]), str(row["action"])): 100.0
+        (str(row["guard"]), str(row["load"]), str(row["action"])): 100.0
         * float(row["share"])
         for row in rows
     }
@@ -449,8 +438,8 @@ def plot_guard_actions(
         bottoms = [0.0, 0.0]
         for action in ACTION_ORDER:
             values = [
-                shares[(stage, load, action)]
-                for stage in ("raw", "safe")
+                shares[(guard, load, action)]
+                for guard in GUARD_ORDER
             ]
             ax.bar(
                 [0, 1],
@@ -461,12 +450,15 @@ def plot_guard_actions(
                 width=0.60,
             )
             bottoms = [bottom + value for bottom, value in zip(bottoms, values)]
-        ax.set_xticks([0, 1], ["Raw", "After guard"])
+        ax.set_xticks([0, 1], [GUARD_LABEL[guard] for guard in GUARD_ORDER])
         ax.set_title(load.capitalize())
         ax.set_ylim(0, 100)
         percent_axis(ax)
     axes[0].set_ylabel("Action share")
-    fig.suptitle("SpecNet action distribution before and after Safety Guard", fontweight="bold")
+    fig.suptitle(
+        "SpecNet final action distribution: Guard off vs on",
+        fontweight="bold",
+    )
     handles, labels = axes[-1].get_legend_handles_labels()
     fig.legend(
         handles,
@@ -477,7 +469,7 @@ def plot_guard_actions(
         frameon=False,
     )
     fig.subplots_adjust(bottom=0.27, wspace=0.16)
-    save_figure(fig, output_dir, "fig_quality_balance_guard_actions", dpi)
+    save_figure(fig, output_dir, "fig_quality_balance_specnet_guard_actions", dpi)
     plt.close(fig)
 
 
@@ -524,7 +516,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        default=str(SCRIPT_DIR / "figures_quality_balance_20260728"),
+        default=str(SCRIPT_DIR / "figures_quality_balance_bandit_guard_20260729"),
     )
     parser.add_argument("--dpi", type=int, default=300)
     return parser.parse_args()
@@ -542,18 +534,18 @@ def main() -> None:
     lambdas = aggregate_lambda(input_root)
     evidence = paired_evidence(input_root)
 
-    write_csv(Path(output_dir) / "quality_balance_mechanisms.csv", mechanisms)
+    write_csv(Path(output_dir) / "specnet_guard_mechanisms.csv", mechanisms)
     write_csv(Path(output_dir) / "quality_balance_networks.csv", networks)
-    write_csv(Path(output_dir) / "quality_balance_actions.csv", actions)
+    write_csv(Path(output_dir) / "specnet_guard_actions.csv", actions)
     write_csv(Path(output_dir) / "quality_balance_lambda.csv", lambdas)
-    write_csv(Path(output_dir) / "quality_balance_paired_evidence.csv", evidence)
+    write_csv(Path(output_dir) / "specnet_guard_paired_evidence.csv", evidence)
 
     plot_mechanism_metric(
         mechanisms,
         "avg_quality",
         "Average realized quality",
-        "Rule/Bandit × Safety Guard quality",
-        "fig_quality_balance_2x2_quality",
+        "SpecNet: Safety Guard effect on realized quality",
+        "fig_quality_balance_specnet_guard_quality",
         output_dir,
         args.dpi,
     )
@@ -561,8 +553,8 @@ def main() -> None:
         mechanisms,
         "p99_latency",
         "p99 workflow latency",
-        "Rule/Bandit × Safety Guard tail latency",
-        "fig_quality_balance_2x2_p99",
+        "SpecNet: Safety Guard effect on tail latency",
+        "fig_quality_balance_specnet_guard_p99",
         output_dir,
         args.dpi,
     )
@@ -570,8 +562,8 @@ def main() -> None:
         mechanisms,
         "wasted_speculative_bytes_per_workflow",
         "True wasted speculative bytes / workflow",
-        "Rule/Bandit × Safety Guard true waste",
-        "fig_quality_balance_2x2_waste",
+        "SpecNet: Safety Guard effect on true waste",
+        "fig_quality_balance_specnet_guard_waste",
         output_dir,
         args.dpi,
     )
@@ -579,8 +571,8 @@ def main() -> None:
         mechanisms,
         "quality_violation_ratio",
         "Workflow quality violation ratio",
-        "Realized Q < 0.90 remains observable",
-        "fig_quality_balance_2x2_violations",
+        "SpecNet: Safety Guard effect on realized Q < 0.90",
+        "fig_quality_balance_specnet_guard_violations",
         output_dir,
         args.dpi,
         percent=True,

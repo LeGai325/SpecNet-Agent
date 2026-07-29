@@ -210,8 +210,10 @@ python specnet_agent_experiments/specnet_agent_experiment.py \
 ```
 
 Run the same command once with `--safety-guard off` and once with `on`.
-`rule_balanced` and `specnet_agent_path_aware_quality` from the two runs form the
-Rule/Bandit × Guard off/on 2×2 ablation. `lambda_updates.csv` records one
+The plotting comparison uses `specnet_agent_path_aware_quality` from the two
+runs to form the SpecNet Guard off/on ablation. The action comparison reads the
+final `action_counts.csv` from both runs; it does not treat the Guard-on raw
+proposal as the Guard-off result. `lambda_updates.csv` records one
 Lagrange-multiplier update per complete load cycle.
 
 Generate the quality-balance figures without overwriting the earlier
@@ -220,7 +222,7 @@ Generate the quality-balance figures without overwriting the earlier
 ```bash
 python specnet_plotting/plotting_multi/plot_quality_balance.py \
   --input-root outputs/quality_balance_20260728 \
-  --output-dir specnet_plotting/plotting_multi/figures_quality_balance_20260728
+  --output-dir specnet_plotting/plotting_multi/figures_quality_balance_bandit_guard_20260729
 ```
 
 After producing all four modified-SpecNet network runs, generate the full

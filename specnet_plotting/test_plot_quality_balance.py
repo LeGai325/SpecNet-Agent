@@ -38,6 +38,9 @@ class QualityBalancePlottingTest(unittest.TestCase):
             summaries = []
             actions = []
             raw_actions = []
+            final_action = (
+                "moderate" if directory == "borrowing_guard_off" else "full"
+            )
             for load_index, load in enumerate(plotting.LOAD_ORDER):
                 for policy_index, policy in enumerate(
                     ("rule_balanced", "specnet_agent_ts_11", "specnet_agent_ts_23")
@@ -58,7 +61,7 @@ class QualityBalancePlottingTest(unittest.TestCase):
                             {
                                 "policy": policy,
                                 "load": load,
-                                "action": "full",
+                                "action": final_action,
                                 "count": 4,
                             }
                         )
@@ -88,7 +91,7 @@ class QualityBalancePlottingTest(unittest.TestCase):
                 ],
             )
 
-    def test_aggregation_builds_2x2_and_network_views(self) -> None:
+    def test_aggregation_builds_bandit_guard_and_network_views(self) -> None:
         self.make_input()
 
         mechanisms = plotting.aggregate_mechanisms(self.artifacts)
@@ -97,11 +100,15 @@ class QualityBalancePlottingTest(unittest.TestCase):
         lambdas = plotting.aggregate_lambda(self.artifacts)
         evidence = plotting.paired_evidence(self.artifacts)
 
-        self.assertEqual(len(mechanisms), 12)
+        self.assertEqual(len(mechanisms), 6)
         self.assertEqual(len(networks), 9)
         self.assertEqual(len(actions), 30)
         self.assertEqual(len(lambdas), 6)
-        self.assertEqual(len(evidence), 60)
+        self.assertEqual(len(evidence), 45)
+        self.assertEqual(
+            {row["mechanism"] for row in mechanisms},
+            {"bandit_off", "bandit_on"},
+        )
         bandit_light = next(
             row
             for row in mechanisms
@@ -109,14 +116,22 @@ class QualityBalancePlottingTest(unittest.TestCase):
         )
         self.assertEqual(bandit_light["observations"], 2)
         self.assertEqual(bandit_light["p99_latency"], 21.5)
-        raw_critical = next(
+        guard_off_moderate = next(
             row
             for row in actions
-            if row["stage"] == "raw"
+            if row["guard"] == "off"
             and row["load"] == "heavy"
-            and row["action"] == "critical_only"
+            and row["action"] == "moderate"
         )
-        self.assertEqual(raw_critical["share"], 1.0)
+        guard_on_full = next(
+            row
+            for row in actions
+            if row["guard"] == "on"
+            and row["load"] == "heavy"
+            and row["action"] == "full"
+        )
+        self.assertEqual(guard_off_moderate["share"], 1.0)
+        self.assertEqual(guard_on_full["share"], 1.0)
 
     def test_missing_experiment_file_is_rejected(self) -> None:
         self.make_input()
