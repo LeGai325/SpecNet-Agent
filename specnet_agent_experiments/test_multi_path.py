@@ -315,7 +315,10 @@ class MultiPathSchedulerTest(unittest.TestCase):
         }
         for metric, value in expected.items():
             with self.subTest(metric=metric):
-                self.assertEqual(summary[metric], value)
+                if isinstance(value, float):
+                    self.assertAlmostEqual(summary[metric], value, places=12)
+                else:
+                    self.assertEqual(summary[metric], value)
         self.assertEqual({flow.path_id for flow in simulator.flows.values()}, {"shared"})
 
     def test_training_and_validation_use_selected_network_model(self) -> None:
