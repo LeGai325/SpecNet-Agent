@@ -65,6 +65,30 @@ recovery
 当前 `Simulator.serve_active_flows()` 使用 weighted max-min 风格的容量分配。
 `Policy.flow_weight()` 返回的权重只是 QoS proxy，不是真实硬件队列。
 
+Simulator 支持三个网络模型：
+
+- `single_bottleneck`：默认模型，所有 flow 共享一条容量为 16 的 `shared` 路径。
+- `service_paths`：`planner/judge -> control`、
+  `retrieval/tool/storage/background -> data`、`llm -> model`，三条路径容量均为 16。
+- `service_paths_borrowing`：先保证上述每条路径各自最多使用 16，再把当前周期未使用的
+  容量汇总，按现有 flow 权重分给仍未完成的 flow。
+
+多路径模式在每条路径内独立执行同一套 weighted max-min 分配。它不模拟 source、
+destination、逐跳链路、共享核心或 ECMP。`Flow.path_id` 仅表示逻辑容量池。
+
+borrowing 模式是工作守恒的容量共享，不改变 `Flow.path_id`。`path_results.csv` 继续记录
+物理路径服务量；`path_borrowing_results.csv` 额外记录保障容量服务量、借出量、借入量和
+借用后的剩余容量。
+
+当前多路径实现中的 congestion、Slack、speculative pressure 和 background pressure
+仍从全部 active flow 计算；只有显式选择的新 variant 会补充紧凑路径状态。
+
+`path_aware_quality` controller variant 额外提供紧凑的逐路径决策状态：
+`slack`、最拥挤 required path pressure、跨路径 optional headroom 和全局
+speculative pressure。required pressure 与 headroom 都按 12 个调度周期的逐路径容量
+归一化；在单瓶颈模式下会确定性退化为一个 shared path。旧 controller variant
+及其状态键保持不变。
+
 合并真实 QoS 时，建议：
 
 1. 保留现有 weighted allocation 作为 baseline。
@@ -76,6 +100,11 @@ recovery
 
 `Simulator.spawn_branches()` 根据 `ACTION_CONFIG` 决定 fanout、额外 branch 和后台流量。
 当前行为是模拟式 fanout 控制。
+
+Quality 在 workflow 完成时根据实际完成并被 judge 采用的 optional branch utility
+计算，不再在动作生成时直接固定。完成且被采用的 speculative bytes 记为 useful；
+未采用、被取消或部分失效的 speculative bytes 才记为 waste。Branch utility 由
+template、branch rank 和 service type 确定性生成，不消耗原 workload 随机序列。
 
 合并真实源端控制时，应把新的 fanout/top-k/parallel-agent 控制映射集中在这一层，避免
 同时修改 reward 或网络 scheduler。
@@ -98,16 +127,57 @@ summary_by_run.csv
 summary_aggregate.csv
 workflow_results.csv
 action_counts.csv
+raw_action_counts.csv
 trained_agents.csv
+lambda_updates.csv
 specnet_agent_model.json
+path_results.csv
+path_borrowing_results.csv
 ```
 
-分析脚本位于 `specnet_plotting/`。所有生成文件放在 `outputs/`，不进入 Git。
+`path_results.csv` 记录逐路径容量、served、利用率和平均队列压力。历史
+`link_utilization` 在多路径模式下使用所有路径的总 served/总容量；`avg_queue_pressure`
+仍保留原来的全局 active bytes/16 口径。分析脚本位于 `specnet_plotting/`。所有生成文件
+放在 `outputs/`，不进入 Git。
+
+### Action 与 background 解耦
+
+`ACTION_CONFIG` 继续定义兼容的 branch fanout。可选 `decoupled` 模式使用
+`DECOUPLED_BACKGROUND_SCALE` 独立控制合成后台流量，降低后台 bytes 不再隐式删除
+承载质量收益的 optional branch。默认 `legacy` 模式保留原来由同一个 action 同时
+改变 fanout 与后台流量的行为。两种模式均不改变 workload、reward、路由和调度权重。
+
+Optional branch admission 在 planner 完成后只执行一次。Simulator 始终保留全部
+required branch，并按 `expected_utility / size` 从高到低选择 action 允许数量的
+optional branch；密度相同时按原 `branch_index` 确定顺序。当前版本不会在运行中
+追加、停止或重新选择 branch。
+
+### 质量约束与 Safety Guard
+
+`Q_target=0.95` 是预先规定的服务级平均目标，`Q_hard=0.90` 是单 workflow
+硬下限。validation 只能选择超参数和 checkpoint，不能改变目标。Bandit Q 值仍按
+workflow 完成结果更新；拉格朗日乘子只在 light、medium、heavy 各完成一个 episode
+后更新一次：
+
+$$
+g_k=\max_{\ell}\left(Q_{\mathrm{target}}-\overline{Q}_{k,\ell}\right)
+$$
+
+$$
+\lambda_{k+1}=\operatorname{clip}
+\left(\lambda_k+\eta_\lambda g_k,0,\lambda_{\max}\right)
+$$
+
+Safety Guard 在动作执行前检查 expected optional utility 对应的 predicted quality。
+低于 `Q_hard` 的 raw action 被替换为可行动作；若不存在可行动作，则选择 predicted
+quality 最高的动作并记录 `quality_constraint_infeasible`。实际完成质量低于硬下限
+记为不可由未来 workflow 补偿的 `quality_violation`，不称为 quality debt。
 
 ## 测试边界
 
 - `test_slack_estimation.py`：Slack 公式、queue diagnostics 和配置回归。
 - `test_training_stability.py`：训练 schedule、checkpoint 和 validation 配置。
 - `test_slack_calibration.py`：离线 calibration 分组和 role-aware 估算。
+- `test_multi_path.py`：路径映射、容量隔离、调度权重、默认兼容性和输出契约。
 
 新增模块至少应包含一个针对新行为的测试，以及一个确认旧默认行为不变的回归测试。

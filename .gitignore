@@ -18,6 +18,12 @@ figures/
 figures_png_pdf/
 figures_matplotlib/
 specnet_agent_experiments/results*/
+specnet_agent_experiments/test_artifacts/
+specnet_plotting/test_artifacts/
+specnet_plotting/plotting_multi/figures/
+specnet_plotting/plotting_multi/figures_quality_balance*/
+specnet_plotting/plotting_multi/figures_modified_networks*/
+specnet_plotting/plotting_multi/figures_quality_balance_bandit_guard*/
 
 # Local editor files
 .vscode/

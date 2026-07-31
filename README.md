@@ -60,6 +60,56 @@ python3 specnet_agent_experiments/specnet_agent_experiment.py \
 
 生成的实验输出默认不会进入 Git。
 
+## 简化多路径模型
+
+默认网络模型仍是所有 flow 共享 16 单位容量的单瓶颈：
+
+```text
+--network-model single_bottleneck
+```
+
+可选的服务分路径模型把 flow 确定性映射到三条容量均为 16 的独立逻辑路径：
+
+```text
+control: planner, judge
+data:    retrieval, tool, storage, background
+model:   llm
+```
+
+启用方式：
+
+```bash
+python3 specnet_agent_experiments/specnet_agent_experiment.py \
+  --network-model service_paths \
+  --output-dir outputs/service_paths_smoke \
+  --train-episodes 3 \
+  --eval-runs 1 \
+  --duration 800 \
+  --max-workflows 30 \
+  --max-time 2500
+```
+
+工作守恒版本保留上述服务主路径和每条路径 16 单位保障容量，并允许仍有积压的路径
+借用其他路径在当前周期未使用的容量：
+
+```bash
+python3 specnet_agent_experiments/specnet_agent_experiment.py \
+  --network-model service_paths_borrowing \
+  --output-dir outputs/service_paths_borrowing_smoke \
+  --train-episodes 3 \
+  --eval-runs 1 \
+  --duration 800 \
+  --max-workflows 30 \
+  --max-time 2500
+```
+
+借用只发生在容量分配阶段，不改变 flow 的服务主路径，也不实现逐跳选路或迁移。
+借入、借出和借用后空闲容量写入 `path_borrowing_results.csv`。
+
+该模式只改变容量分配：Controller 的 congestion、Slack 和 speculative pressure 仍按
+全局 active flow 聚合。三条路径的总理论容量为 48，因此它与单瓶颈模式的差异同时包含
+路径隔离和额外并行容量，不能解释为纯调度收益。逐路径统计写入 `path_results.csv`。
+
 ## Controller 状态消融
 
 当前 learned Controller 支持四种状态配置：
@@ -109,6 +159,8 @@ V2.1 改善了离线估计误差，但在 3-seed 运行时预实验中没有稳�
 - `no_source_control` 当前由 `critical_path_only` 代理，不是严格的单开关消融。
 - `no_learning` 当前由 `rule_balanced` 代理。
 - Queue priority 目前通过模拟器中的 weighted allocation 实现，不是真实 Q0-Q3 队列。
+- `service_paths` 及其 borrowing 版本是服务类型级逻辑路径，不是逐跳拓扑或 ECMP；
+  Controller 状态仍是全局聚合。
 - 完整实验输出和个人过程报告保存在 Git 之外。
 
 修改 Controller 语义前，请先阅读：
@@ -126,6 +178,63 @@ action 定义和待研究机制，避免一次改动多个变量。分支、测�
 
 本协作基线整理自本地开发 checkpoint `8cd5988`。此前的个人迭代历史继续保留在本地
 研究工作区中，没有导入这个新仓库。
+
+## Action/background decoupling
+
+Use `--action-coupling decoupled` to separate quality-bearing branch fanout from
+synthetic background traffic. Actions still choose the same branch count, while
+background traffic uses an independent, low-rate scale. The default `legacy`
+mode preserves historical results in which each action jointly changed fanout
+and background volume.
+
+## Multi-path quality constraints
+
+The quality-balance controller keeps the service target fixed before training:
+
+```text
+Q_target = 0.95
+Q_hard   = 0.90
+```
+
+Validation may select hyperparameters and checkpoints, but never changes these
+targets. Enable the compact path-aware state and Safety Guard with:
+
+```bash
+python specnet_agent_experiments/specnet_agent_experiment.py \
+  --network-model service_paths_borrowing \
+  --action-coupling decoupled \
+  --controller-variants path_aware_quality \
+  --quality-target 0.95 \
+  --quality-hard-floor 0.90 \
+  --safety-guard on
+```
+
+Run the same command once with `--safety-guard off` and once with `on`.
+The plotting comparison uses `specnet_agent_path_aware_quality` from the two
+runs to form the SpecNet Guard off/on ablation. The action comparison reads the
+final `action_counts.csv` from both runs; it does not treat the Guard-on raw
+proposal as the Guard-off result. `lambda_updates.csv` records one
+Lagrange-multiplier update per complete load cycle.
+
+Generate the quality-balance figures without overwriting the earlier
+`plotting_multi/figures` directory:
+
+```bash
+python specnet_plotting/plotting_multi/plot_quality_balance.py \
+  --input-root outputs/quality_balance_20260728 \
+  --output-dir specnet_plotting/plotting_multi/figures_quality_balance_bandit_guard_20260729
+```
+
+After producing all four modified-SpecNet network runs, generate the full
+1×16/1×48/fixed-3×16/borrowing-3×16 comparison with the original network
+plotting entry point:
+
+```bash
+python specnet_plotting/plotting_multi/plot_specnet_networks.py \
+  --dataset-layout quality_balance \
+  --input-root outputs/quality_balance_20260728 \
+  --output-dir specnet_plotting/plotting_multi/figures_modified_networks_20260728
+```
 
 ## License
 

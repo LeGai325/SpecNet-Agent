@@ -1,6 +1,6 @@
 # 当前项目状态
 
-更新时间：2026-07-16
+更新时间：2026-07-30
 
 ## 已实现
 
@@ -15,10 +15,23 @@
   选择。
 - Work-and-queue-aware Slack v2，以及可配置的 role-aware v2.1 候选。
 - Controller ablation、Slack calibration、训练稳定性和 Pareto 分析脚本。
+- 可选的三条服务逻辑路径调度、工作守恒的空闲容量借用，以及逐路径容量、利用率、
+  队列压力和借用统计输出。
+- 基于实际 retained optional utility 的 realized quality，以及 useful/unused
+  speculative bytes 分离记账。
+- 可选 `decoupled` action 模式将 optional branch fanout 与后台流量独立控制；
+  默认 `legacy` 模式保留用于复现旧实验。
+- optional branch 在 planner 完成后按 utility/byte 一次性选入；动态追加和停止延期。
+- 新增 `path_aware_quality` controller variant，以 required path pressure 和
+  optional headroom 表达多路径状态；原有 controller variant 保持兼容。
+- 固定平均质量目标 0.95 和单 workflow 硬下限 0.90；新增动作前 Safety Guard、
+  完整负载周期级 λ 更新、约束感知 checkpoint 选择及 SpecNet Guard off/on 消融输出。
+- 渐进式 speculation admission、运行中追加与停止 branch 仍明确延期。
 
 ## 当前默认配置
 
 - Slack 使用 `total + 1.0` 的 v2 估算器。
+- 网络模型默认使用 `single_bottleneck`；`service_paths` 需通过 CLI 显式启用。
 - Role-aware `policy_weighted + 0.5` 仅作为可选候选；它没有在现有 3-seed
   preflight 中稳定超过 v2。
 - 稳定训练推荐使用 90 episodes、线性 epsilon 衰减、visit-decay learning rate、
@@ -30,6 +43,12 @@
 - `no_source_control` 尚未实现为严格开关，目前由 `critical_path_only` 代理。
 - `no_learning` 尚未实现为严格开关，目前由 `rule_balanced` 代理。
 - Speculative-pressure、真实源端控制和 QoS 队列模块仍需与其他开发者代码合并。
+- `service_paths` 只隔离调度容量；旧 Controller variant 的 congestion、Slack 和
+  speculative pressure 仍是全局聚合状态。可选 `path_aware_quality` 已补充紧凑的
+  required path pressure 和 optional headroom，但尚未把所有旧状态改为逐路径版本。
+- `service_paths_borrowing` 只共享当前周期的剩余容量，不实现动态最短队列选路、flow
+  迁移或逐跳路径。
+- 服务逻辑路径不是逐跳拓扑，不包含共享核心、ECMP 或路由变化。
 
 ## 合并时的约束
 
@@ -45,3 +64,4 @@
 2. 合并真实源端 fanout/speculation control。
 3. 合并新的 speculative-pressure 信号。
 4. 在相同 reward、action 和 workload 下重新运行 Controller ablation。
+5. 在独立 PR 中评估 path-aware congestion 与 Slack，避免与本次调度改动混合。

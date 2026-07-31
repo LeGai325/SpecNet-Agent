@@ -23,11 +23,21 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 ACTIONS = ("full", "moderate", "conservative", "critical_only", "recovery")
 DEFAULT_QUALITY_WEIGHTS = (0.5, 1.0, 1.6, 2.5, 4.0, 6.0)
+DEFAULT_QUALITY_HARD_FLOOR = 0.90
+DEFAULT_LAMBDA_INITIAL = 0.0
+DEFAULT_LAMBDA_LEARNING_RATE = 2.0
+DEFAULT_LAMBDA_MAX = 12.0
 CONTROLLER_VARIANT_FEATURES = {
     "full": ("congestion", "slack", "spec_pressure"),
     "congestion_only": ("congestion",),
     "no_slack": ("congestion", "spec_pressure"),
     "no_spec_pressure": ("congestion", "slack"),
+    "path_aware_quality": (
+        "slack",
+        "required_path_pressure",
+        "optional_headroom",
+        "spec_pressure",
+    ),
 }
 StateKey = Tuple[str, ...]
 SLACK_QUEUE_BASES = ("total", "policy_weighted")
@@ -76,6 +86,18 @@ ACTION_CONFIG = {
         "background_scale": 1.00,
         "quality_floor": 0.98,
     },
+}
+
+ACTION_COUPLING_MODES = ("legacy", "decoupled")
+DEFAULT_ACTION_COUPLING = "legacy"
+# Background load is an independent traffic-control knob in decoupled mode.
+# Quality-bearing branch fanout remains defined by ACTION_CONFIG.
+DECOUPLED_BACKGROUND_SCALE = {
+    "full": 0.10,
+    "moderate": 0.10,
+    "conservative": 0.00,
+    "critical_only": 0.00,
+    "recovery": 0.10,
 }
 
 
@@ -128,12 +150,42 @@ LOAD_CONFIG = {
     "heavy": {"mean_interarrival": 24.0, "burst_probability": 0.20, "capacity": 16.0},
 }
 
+NETWORK_MODELS = ("single_bottleneck", "service_paths", "service_paths_borrowing")
+SERVICE_PATH_BY_TYPE = {
+    "planner": "control",
+    "judge": "control",
+    "retrieval": "data",
+    "tool": "data",
+    "storage": "data",
+    "background": "data",
+    "llm": "model",
+}
+SERVICE_PATH_ORDER = ("control", "data", "model")
+SERVICE_PATH_CAPACITY = 16.0
+BASE_REQUIRED_QUALITY = 0.76
+DEFAULT_QUALITY_TARGET = 0.95
+OPTIONAL_SERVICE_UTILITY = {
+    "retrieval": 1.00,
+    "tool": 1.10,
+    "storage": 0.75,
+    "llm": 1.25,
+}
+JUDGE_RETAIN_LIMIT = {
+    "rag_qa": 3,
+    "coding": 2,
+    "research": 4,
+    "debate": 2,
+}
+
 
 @dataclass
 class BranchSpec:
     service_type: str
     size: float
     required: bool
+    branch_index: int = 0
+    selection_probability: float = 0.0
+    expected_utility: float = 0.0
 
 
 @dataclass
@@ -165,6 +217,11 @@ class Flow:
     completed_at: Optional[int] = None
     cancelled: bool = False
     served: float = 0.0
+    path_id: str = "shared"
+    selection_probability: float = 0.0
+    expected_utility: float = 0.0
+    retained: bool = False
+    used_by_judge: bool = False
 
 
 @dataclass
@@ -181,6 +238,12 @@ class WorkflowRuntime:
     llm_flow: Optional[int] = None
     judge_flow: Optional[int] = None
     action: Optional[str] = None
+    raw_action: Optional[str] = None
+    safe_action: Optional[str] = None
+    guard_overridden: bool = False
+    override_reason: str = ""
+    quality_constraint_infeasible: bool = False
+    quality_violation: bool = False
     decision_state: Optional[StateKey] = None
     decision_time: Optional[int] = None
     decision_remaining_budget: Optional[float] = None
@@ -203,9 +266,20 @@ class WorkflowRuntime:
     decision_estimated_remaining_time: Optional[float] = None
     decision_slack_ratio: Optional[float] = None
     decision_slack_bucket: Optional[str] = None
-    quality: float = 1.0
+    decision_required_path_pressure_ratio: Optional[float] = None
+    decision_required_path_pressure_bucket: Optional[str] = None
+    decision_optional_headroom_ratio: Optional[float] = None
+    decision_optional_headroom_bucket: Optional[str] = None
+    predicted_quality: float = 1.0
+    quality: float = BASE_REQUIRED_QUALITY
     wasted_speculative_bytes: float = 0.0
+    useful_speculative_bytes: float = 0.0
+    unused_speculative_bytes: float = 0.0
+    retained_optional_count: int = 0
+    selected_optional_utility: float = 0.0
+    total_optional_utility: float = 0.0
     background_bytes_served: float = 0.0
+    quality_accounted: bool = False
 
     @property
     def deadline_time(self) -> float:
@@ -234,6 +308,14 @@ def percentile(values: List[float], p: float) -> float:
     return sorted_values[low] * (1 - weight) + sorted_values[high] * weight
 
 
+def optional_branch_value(service_type: str, optional_rank: int) -> Tuple[float, float]:
+    """Return deterministic selection probability and expected quality utility."""
+    base_utility = OPTIONAL_SERVICE_UTILITY.get(service_type, 0.80)
+    selection_probability = max(0.20, 0.90 / (1.0 + 0.22 * optional_rank))
+    expected_utility = selection_probability * base_utility
+    return selection_probability, expected_utility
+
+
 def generate_workload(
     seed: int,
     load: str,
@@ -260,12 +342,26 @@ def generate_workload(
         meta = TEMPLATES[template]
         required_count = meta["required_branches"]
         branches: List[BranchSpec] = []
+        optional_rank = 0
         for idx, service_type in enumerate(meta["branch_types"]):
+            required = idx < required_count
+            if required:
+                selection_probability = 1.0
+                expected_utility = 0.0
+            else:
+                selection_probability, expected_utility = optional_branch_value(
+                    service_type,
+                    optional_rank,
+                )
+                optional_rank += 1
             branches.append(
                 BranchSpec(
                     service_type=service_type,
                     size=lognormal_size(rng, service_type),
-                    required=idx < required_count,
+                    required=required,
+                    branch_index=idx,
+                    selection_probability=selection_probability,
+                    expected_utility=expected_utility,
                 )
             )
 
@@ -297,9 +393,11 @@ class Policy:
     def __init__(self, seed: int = 0) -> None:
         self.rng = random.Random(seed)
         self.action_counter: Counter[str] = Counter()
+        self.raw_action_counter: Counter[str] = Counter()
 
     def reset_for_run(self) -> None:
         self.action_counter.clear()
+        self.raw_action_counter.clear()
 
     def decide_action(self, sim: "Simulator", workflow: WorkflowRuntime) -> str:
         return "full"
@@ -400,7 +498,6 @@ class RuleBasedFeedbackPolicy(CriticalPathOnlyPolicy):
                 action = "moderate"
         else:
             raise ValueError(f"unknown rule profile: {self.profile}")
-        self.action_counter[action] += 1
         return action
 
 
@@ -423,6 +520,11 @@ class SpecNetAgentBanditPolicy(CriticalPathOnlyPolicy):
         learning_rate_min: float = 0.03,
         slack_queue_basis: str = DEFAULT_SLACK_QUEUE_BASIS,
         slack_queue_weight: float = DEFAULT_SLACK_QUEUE_WEIGHT,
+        quality_target: float = DEFAULT_QUALITY_TARGET,
+        quality_hard_floor: float = DEFAULT_QUALITY_HARD_FLOOR,
+        lambda_initial: float = DEFAULT_LAMBDA_INITIAL,
+        lambda_learning_rate: float = DEFAULT_LAMBDA_LEARNING_RATE,
+        lambda_max: float = DEFAULT_LAMBDA_MAX,
     ) -> None:
         super().__init__(seed=seed)
         if controller_variant not in CONTROLLER_VARIANT_FEATURES:
@@ -441,6 +543,12 @@ class SpecNetAgentBanditPolicy(CriticalPathOnlyPolicy):
             raise ValueError(f"unknown Slack queue basis: {slack_queue_basis}")
         if slack_queue_weight < 0.0:
             raise ValueError("Slack queue weight must be non-negative")
+        if not 0.0 <= quality_hard_floor <= quality_target <= 1.0:
+            raise ValueError("quality constraints must satisfy 0 <= hard floor <= target <= 1")
+        if lambda_initial < 0.0 or lambda_learning_rate < 0.0 or lambda_max < 0.0:
+            raise ValueError("lambda parameters must be non-negative")
+        if lambda_initial > lambda_max:
+            raise ValueError("lambda initial value must not exceed lambda max")
         self.name = name
         self.quality_weight = quality_weight
         self.controller_variant = controller_variant
@@ -456,6 +564,12 @@ class SpecNetAgentBanditPolicy(CriticalPathOnlyPolicy):
         self.learning_rate_schedule = learning_rate_schedule
         self.slack_queue_basis = slack_queue_basis
         self.slack_queue_weight = slack_queue_weight
+        self.quality_target = quality_target
+        self.quality_hard_floor = quality_hard_floor
+        self.quality_lagrange_multiplier = lambda_initial
+        self.lambda_learning_rate = lambda_learning_rate
+        self.lambda_max = lambda_max
+        self.lambda_updates: List[Dict[str, object]] = []
         self.train = train
         self.final_training_epsilon = epsilon
         self.selected_checkpoint_episode: Optional[int] = None
@@ -487,6 +601,8 @@ class SpecNetAgentBanditPolicy(CriticalPathOnlyPolicy):
             "congestion": sim.congestion_level,
             "slack": lambda: sim.workflow_slack_bucket(workflow),
             "spec_pressure": sim.speculative_pressure_bucket,
+            "required_path_pressure": lambda: sim.required_path_pressure_bucket(workflow),
+            "optional_headroom": lambda: sim.optional_headroom_bucket(workflow),
         }
         return tuple(state_getters[feature]() for feature in self.state_features)
 
@@ -497,7 +613,6 @@ class SpecNetAgentBanditPolicy(CriticalPathOnlyPolicy):
         else:
             q_for_state = self.q_values[state]
             action = max(ACTIONS, key=lambda a: (q_for_state[a], -ACTIONS.index(a)))
-        self.action_counter[action] += 1
         workflow.decision_state = state
         return action
 
@@ -512,6 +627,63 @@ class SpecNetAgentBanditPolicy(CriticalPathOnlyPolicy):
         self.q_values[state][action] = old_value + learning_rate * (reward - old_value)
         self.counts[state][action] += 1
 
+    def update_quality_multiplier(
+        self,
+        load_summaries: Dict[str, Dict[str, object]],
+        episode: int,
+    ) -> None:
+        missing_loads = [
+            load
+            for load, summary in load_summaries.items()
+            if int(summary["completed"]) == 0
+        ]
+        if missing_loads:
+            self.lambda_updates.append(
+                {
+                    "episode": episode,
+                    "quality_by_load": {
+                        load: (
+                            float(summary["avg_quality"])
+                            if int(summary["completed"]) > 0
+                            else None
+                        )
+                        for load, summary in load_summaries.items()
+                    },
+                    "worst_load_quality": "",
+                    "quality_gap": "",
+                    "lambda_before": self.quality_lagrange_multiplier,
+                    "lambda_after": self.quality_lagrange_multiplier,
+                    "updated": False,
+                    "missing_loads": missing_loads,
+                }
+            )
+            return
+        quality_by_load = {
+            load: float(summary["avg_quality"])
+            for load, summary in load_summaries.items()
+        }
+        worst_gap = max(
+            self.quality_target - average_quality
+            for average_quality in quality_by_load.values()
+        )
+        old_multiplier = self.quality_lagrange_multiplier
+        self.quality_lagrange_multiplier = min(
+            self.lambda_max,
+            max(0.0, old_multiplier + self.lambda_learning_rate * worst_gap),
+        )
+        self.lambda_updates.append(
+            {
+                "episode": episode,
+                "quality_by_load": quality_by_load,
+                "worst_load_quality": min(quality_by_load.values()),
+                "quality_gap": worst_gap,
+                "lambda_before": old_multiplier,
+                "lambda_after": self.quality_lagrange_multiplier,
+                "updated": True,
+                "missing_loads": [],
+            }
+        )
+
     def set_evaluation_mode(self) -> None:
         if self.train:
             self.final_training_epsilon = self.epsilon
@@ -522,6 +694,7 @@ class SpecNetAgentBanditPolicy(CriticalPathOnlyPolicy):
         return {
             "q_values": {state: dict(values) for state, values in self.q_values.items()},
             "counts": {state: Counter(values) for state, values in self.counts.items()},
+            "quality_lagrange_multiplier": self.quality_lagrange_multiplier,
         }
 
     def restore_snapshot(self, snapshot: Dict[str, object]) -> None:
@@ -535,11 +708,20 @@ class SpecNetAgentBanditPolicy(CriticalPathOnlyPolicy):
             Counter,
             {state: Counter(values) for state, values in counts.items()},
         )
+        self.quality_lagrange_multiplier = float(
+            snapshot.get("quality_lagrange_multiplier", self.quality_lagrange_multiplier)
+        )
 
     def metadata(self) -> Dict[str, object]:
         return {
             "name": self.name,
             "quality_weight": self.quality_weight,
+            "quality_target": self.quality_target,
+            "quality_hard_floor": self.quality_hard_floor,
+            "quality_lagrange_multiplier": self.quality_lagrange_multiplier,
+            "lambda_learning_rate": self.lambda_learning_rate,
+            "lambda_max": self.lambda_max,
+            "lambda_updates": self.lambda_updates,
             "controller_variant": self.controller_variant,
             "state_features": list(self.state_features),
             "training_schedule": {
@@ -579,11 +761,27 @@ class Simulator:
         quality_weight: float = 1.60,
         slack_queue_basis: str = DEFAULT_SLACK_QUEUE_BASIS,
         slack_queue_weight: float = DEFAULT_SLACK_QUEUE_WEIGHT,
+        network_model: str = "single_bottleneck",
+        single_bottleneck_capacity: Optional[float] = None,
+        action_coupling: str = DEFAULT_ACTION_COUPLING,
+        quality_target: float = DEFAULT_QUALITY_TARGET,
+        quality_hard_floor: float = DEFAULT_QUALITY_HARD_FLOOR,
+        safety_guard: bool = False,
     ) -> None:
         if slack_queue_basis not in SLACK_QUEUE_BASES:
             raise ValueError(f"unknown Slack queue basis: {slack_queue_basis}")
         if slack_queue_weight < 0.0:
             raise ValueError("Slack queue weight must be non-negative")
+        if not 0.0 <= quality_hard_floor <= quality_target <= 1.0:
+            raise ValueError("quality constraints must satisfy 0 <= hard floor <= target <= 1")
+        if network_model not in NETWORK_MODELS:
+            raise ValueError(f"unknown network model: {network_model}")
+        if single_bottleneck_capacity is not None and single_bottleneck_capacity <= 0.0:
+            raise ValueError("single-bottleneck capacity must be positive")
+        if network_model != "single_bottleneck" and single_bottleneck_capacity is not None:
+            raise ValueError("single-bottleneck capacity only applies to single_bottleneck")
+        if action_coupling not in ACTION_COUPLING_MODES:
+            raise ValueError(f"unknown action coupling mode: {action_coupling}")
         self.specs = list(specs)
         self.policy = policy
         self.load = load
@@ -593,7 +791,21 @@ class Simulator:
         self.quality_weight = quality_weight
         self.slack_queue_basis = slack_queue_basis
         self.slack_queue_weight = slack_queue_weight
-        self.capacity = LOAD_CONFIG[load]["capacity"]
+        self.network_model = network_model
+        self.action_coupling = action_coupling
+        self.quality_target = quality_target
+        self.quality_hard_floor = quality_hard_floor
+        self.safety_guard = safety_guard
+        self.capacity = (
+            single_bottleneck_capacity
+            if single_bottleneck_capacity is not None
+            else LOAD_CONFIG[load]["capacity"]
+        )
+        self.path_capacities = (
+            {"shared": self.capacity}
+            if network_model == "single_bottleneck"
+            else {path_id: SERVICE_PATH_CAPACITY for path_id in SERVICE_PATH_ORDER}
+        )
         self.time = 0
         self.next_flow_id = 0
         self.flows: Dict[int, Flow] = {}
@@ -604,6 +816,38 @@ class Simulator:
         self.total_capacity = 0.0
         self.total_served = 0.0
         self.queue_pressure_samples: List[float] = []
+        self.path_total_capacity: Dict[str, float] = {
+            path_id: 0.0 for path_id in self.path_capacities
+        }
+        self.path_total_served: Dict[str, float] = {
+            path_id: 0.0 for path_id in self.path_capacities
+        }
+        self.path_queue_pressure_samples: Dict[str, List[float]] = {
+            path_id: [] for path_id in self.path_capacities
+        }
+        self.path_total_base_served: Dict[str, float] = {
+            path_id: 0.0 for path_id in self.path_capacities
+        }
+        self.path_total_lent_served: Dict[str, float] = {
+            path_id: 0.0 for path_id in self.path_capacities
+        }
+        self.path_total_borrowed_received: Dict[str, float] = {
+            path_id: 0.0 for path_id in self.path_capacities
+        }
+        self.path_total_unused_after_lending: Dict[str, float] = {
+            path_id: 0.0 for path_id in self.path_capacities
+        }
+        self.path_total_home_flow_served: Dict[str, float] = {
+            path_id: 0.0 for path_id in self.path_capacities
+        }
+
+    def path_for_service_type(self, service_type: str) -> str:
+        if self.network_model == "single_bottleneck":
+            return "shared"
+        try:
+            return SERVICE_PATH_BY_TYPE[service_type]
+        except KeyError as exc:
+            raise ValueError(f"unknown service type for service_paths: {service_type}") from exc
 
     def new_flow(
         self,
@@ -615,6 +859,8 @@ class Simulator:
         required: bool = False,
         speculative: bool = False,
         background: bool = False,
+        selection_probability: float = 0.0,
+        expected_utility: float = 0.0,
     ) -> int:
         flow = Flow(
             flow_id=self.next_flow_id,
@@ -628,6 +874,9 @@ class Simulator:
             speculative=speculative,
             background=background,
             created_at=self.time,
+            path_id=self.path_for_service_type(service_type),
+            selection_probability=selection_probability,
+            expected_utility=expected_utility,
         )
         self.flows[flow.flow_id] = flow
         self.next_flow_id += 1
@@ -707,6 +956,50 @@ class Simulator:
         required_branch_work = sum(branch.size for branch in workflow.spec.branches if branch.required)
         return required_branch_work + workflow.spec.llm_size + workflow.spec.judge_size
 
+    def required_work_by_path(self, workflow: WorkflowRuntime) -> Dict[str, float]:
+        required_work = {path_id: 0.0 for path_id in self.path_capacities}
+        for flow in self.active_flows():
+            if flow.required:
+                required_work[flow.path_id] += flow.remaining
+        for branch in workflow.spec.branches:
+            if branch.required:
+                required_work[self.path_for_service_type(branch.service_type)] += branch.size
+        required_work[self.path_for_service_type("llm")] += workflow.spec.llm_size
+        required_work[self.path_for_service_type("judge")] += workflow.spec.judge_size
+        return required_work
+
+    def required_path_pressure_ratio(self, workflow: WorkflowRuntime) -> float:
+        required_work = self.required_work_by_path(workflow)
+        return max(
+            required_work[path_id] / max(1.0, capacity * 12.0)
+            for path_id, capacity in self.path_capacities.items()
+        )
+
+    def required_path_pressure_bucket(self, workflow: WorkflowRuntime) -> str:
+        ratio = self.required_path_pressure_ratio(workflow)
+        if ratio < 0.85:
+            return "low_required_path"
+        if ratio < 1.85:
+            return "mid_required_path"
+        return "high_required_path"
+
+    def optional_headroom_ratio(self, workflow: WorkflowRuntime) -> float:
+        required_work = self.required_work_by_path(workflow)
+        total_horizon_capacity = sum(self.path_capacities.values()) * 12.0
+        headroom = sum(
+            max(capacity * 12.0 - required_work[path_id], 0.0)
+            for path_id, capacity in self.path_capacities.items()
+        )
+        return headroom / max(1.0, total_horizon_capacity)
+
+    def optional_headroom_bucket(self, workflow: WorkflowRuntime) -> str:
+        ratio = self.optional_headroom_ratio(workflow)
+        if ratio < 0.25:
+            return "low_optional_headroom"
+        if ratio < 0.60:
+            return "mid_optional_headroom"
+        return "high_optional_headroom"
+
     def slack_queue_work(self, queue_diagnostics: Optional[Dict[str, float]] = None) -> float:
         if self.slack_queue_basis == "total":
             return self.remaining_active_bytes()
@@ -763,6 +1056,10 @@ class Simulator:
         workflow.decision_estimated_remaining_time = self.workflow_estimated_remaining_time(workflow)
         workflow.decision_slack_ratio = self.workflow_slack_ratio(workflow)
         workflow.decision_slack_bucket = self.workflow_slack_bucket(workflow)
+        workflow.decision_required_path_pressure_ratio = self.required_path_pressure_ratio(workflow)
+        workflow.decision_required_path_pressure_bucket = self.required_path_pressure_bucket(workflow)
+        workflow.decision_optional_headroom_ratio = self.optional_headroom_ratio(workflow)
+        workflow.decision_optional_headroom_bucket = self.optional_headroom_bucket(workflow)
 
     def spawn_arrivals(self) -> None:
         for workflow in self.workflows.values():
@@ -798,25 +1095,120 @@ class Simulator:
         by_extra = required + int(config["extra_branches"])
         return max(required, min(max_branches, by_fraction, by_extra))
 
+    def branches_for_action(
+        self,
+        workflow: WorkflowRuntime,
+        action: str,
+    ) -> List[BranchSpec]:
+        branch_count = self.branch_count_for_action(workflow, action)
+        required = [branch for branch in workflow.spec.branches if branch.required]
+        optional_slots = max(0, branch_count - len(required))
+        optional = sorted(
+            (branch for branch in workflow.spec.branches if not branch.required),
+            key=lambda branch: (
+                -(branch.expected_utility / max(1e-9, branch.size)),
+                branch.branch_index,
+            ),
+        )
+        return required + optional[:optional_slots]
+
     def quality_for_action(self, workflow: WorkflowRuntime, action: str, branch_count: int) -> float:
-        meta = TEMPLATES[workflow.spec.template]
-        max_branches = meta["max_branches"]
-        required = meta["required_branches"]
-        if max_branches == required:
+        """Estimate quality before execution; realized quality is computed at completion."""
+        del branch_count
+        optional_specs = [branch for branch in workflow.spec.branches if not branch.required]
+        retain_limit = JUDGE_RETAIN_LIMIT.get(workflow.spec.template, len(optional_specs))
+        potential_utility = sum(
+            sorted(
+                (branch.expected_utility for branch in optional_specs),
+                reverse=True,
+            )[:retain_limit]
+        )
+        if potential_utility <= 1e-12:
             return 1.0
-        extra_ratio = (branch_count - required) / max(1, max_branches - required)
-        smooth_quality = 0.74 + 0.26 * math.log1p(4 * extra_ratio) / math.log1p(4)
-        return min(1.0, max(ACTION_CONFIG[action]["quality_floor"], smooth_quality))
+        selected_optional = [
+            branch
+            for branch in self.branches_for_action(workflow, action)
+            if not branch.required
+        ]
+        selected_utility = sum(
+            sorted(
+                (branch.expected_utility for branch in selected_optional),
+                reverse=True,
+            )[:retain_limit]
+        )
+        retained_fraction = min(1.0, selected_utility / potential_utility)
+        return BASE_REQUIRED_QUALITY + (1.0 - BASE_REQUIRED_QUALITY) * retained_fraction
+
+    def guard_action(
+        self,
+        workflow: WorkflowRuntime,
+        raw_action: str,
+    ) -> Tuple[str, float, bool, str]:
+        predictions = {
+            action: self.quality_for_action(
+                workflow,
+                action,
+                self.branch_count_for_action(workflow, action),
+            )
+            for action in ACTIONS
+        }
+        if not self.safety_guard:
+            return raw_action, predictions[raw_action], False, ""
+        feasible = [
+            action
+            for action in ACTIONS
+            if predictions[action] >= self.quality_hard_floor
+        ]
+        if raw_action in feasible:
+            return raw_action, predictions[raw_action], False, ""
+        if not feasible:
+            safe_action = max(
+                ACTIONS,
+                key=lambda action: (predictions[action], -ACTIONS.index(action)),
+            )
+            return safe_action, predictions[safe_action], True, "quality_constraint_infeasible"
+        if isinstance(self.policy, SpecNetAgentBanditPolicy) and workflow.decision_state is not None:
+            q_values = self.policy.q_values[workflow.decision_state]
+            safe_action = max(
+                feasible,
+                key=lambda action: (q_values[action], -ACTIONS.index(action)),
+            )
+        else:
+            safe_action = min(
+                feasible,
+                key=lambda action: (
+                    predictions[action],
+                    self.branch_count_for_action(workflow, action),
+                    ACTIONS.index(action),
+                ),
+            )
+        return safe_action, predictions[safe_action], False, "predicted_quality_below_hard_floor"
+
+    def background_scale_for_action(self, action: str) -> float:
+        if self.action_coupling == "legacy":
+            return float(ACTION_CONFIG[action]["background_scale"])
+        return DECOUPLED_BACKGROUND_SCALE[action]
 
     def spawn_branches(self, workflow: WorkflowRuntime) -> None:
         self.record_slack_decision(workflow)
-        action = self.policy.decide_action(self, workflow)
+        raw_action = self.policy.decide_action(self, workflow)
+        action, predicted_quality, infeasible, override_reason = self.guard_action(
+            workflow,
+            raw_action,
+        )
+        self.policy.raw_action_counter[raw_action] += 1
+        self.policy.action_counter[action] += 1
+        workflow.raw_action = raw_action
+        workflow.safe_action = action
         workflow.action = action
-        branch_count = self.branch_count_for_action(workflow, action)
-        workflow.quality = self.quality_for_action(workflow, action, branch_count)
+        workflow.guard_overridden = raw_action != action
+        workflow.override_reason = override_reason
+        workflow.quality_constraint_infeasible = infeasible
+        selected_branches = self.branches_for_action(workflow, action)
+        workflow.predicted_quality = predicted_quality
         workflow.stage = "branches"
 
-        for index, branch in enumerate(workflow.spec.branches[:branch_count]):
+        for branch in selected_branches:
             required = branch.required
             speculative = not required
             role = "critical_bulk" if required and branch.size >= 32.0 else "critical_control" if required else "speculative"
@@ -828,6 +1220,8 @@ class Simulator:
                 stage="branch",
                 required=required,
                 speculative=speculative,
+                selection_probability=branch.selection_probability,
+                expected_utility=branch.expected_utility,
             )
             workflow.branch_flows.append(flow_id)
             if required:
@@ -835,10 +1229,10 @@ class Simulator:
             else:
                 workflow.speculative_branch_flows.append(flow_id)
 
-        config = ACTION_CONFIG[action]
-        if config["spawn_background"]:
+        background_scale = self.background_scale_for_action(action)
+        if background_scale > 0.0:
             for size in workflow.spec.background_sizes:
-                scaled_size = max(1.0, size * config["background_scale"])
+                scaled_size = max(1.0, size * background_scale)
                 flow_id = self.new_flow(
                     workflow,
                     "background",
@@ -881,11 +1275,7 @@ class Simulator:
     def finish_workflow(self, workflow: WorkflowRuntime) -> None:
         workflow.stage = "done"
         workflow.complete_time = self.time
-        for flow_id in workflow.speculative_branch_flows:
-            flow = self.flows[flow_id]
-            workflow.wasted_speculative_bytes += flow.served
-            if flow.completed_at is None:
-                flow.cancelled = True
+        self.finalize_quality_and_speculation(workflow)
         for flow_id in workflow.background_flows:
             flow = self.flows[flow_id]
             workflow.background_bytes_served += flow.served
@@ -894,20 +1284,63 @@ class Simulator:
         self.completed_workflows.append(workflow)
         self.policy.on_workflow_complete(workflow, self)
 
-    def serve_active_flows(self) -> None:
-        capacity = self.capacity
-        active = self.active_flows()
-        self.total_capacity += capacity
-        if not active:
+    def finalize_quality_and_speculation(self, workflow: WorkflowRuntime) -> None:
+        if workflow.quality_accounted:
             return
 
-        pressure = sum(flow.remaining for flow in active) / max(1.0, capacity)
-        self.queue_pressure_samples.append(pressure)
+        optional_specs = [branch for branch in workflow.spec.branches if not branch.required]
+        retain_limit = JUDGE_RETAIN_LIMIT.get(workflow.spec.template, len(optional_specs))
+        potential = sorted(
+            (branch.expected_utility for branch in optional_specs),
+            reverse=True,
+        )[:retain_limit]
+        workflow.total_optional_utility = sum(potential)
 
+        completed_optional = [
+            self.flows[flow_id]
+            for flow_id in workflow.speculative_branch_flows
+            if self.flows[flow_id].completed_at is not None
+        ]
+        for flow in completed_optional:
+            flow.retained = True
+        used = sorted(
+            completed_optional,
+            key=lambda flow: (-flow.expected_utility, flow.flow_id),
+        )[:retain_limit]
+        used_ids = {flow.flow_id for flow in used}
+        for flow in used:
+            flow.used_by_judge = True
+            workflow.useful_speculative_bytes += flow.served
+            workflow.selected_optional_utility += flow.expected_utility
+        workflow.retained_optional_count = len(used)
+
+        for flow_id in workflow.speculative_branch_flows:
+            flow = self.flows[flow_id]
+            if flow_id not in used_ids:
+                workflow.wasted_speculative_bytes += flow.served
+                workflow.unused_speculative_bytes += flow.served
+            if flow.completed_at is None:
+                flow.cancelled = True
+
+        if workflow.total_optional_utility <= 1e-12:
+            workflow.quality = 1.0
+        else:
+            retained_fraction = min(
+                1.0,
+                workflow.selected_optional_utility / workflow.total_optional_utility,
+            )
+            workflow.quality = BASE_REQUIRED_QUALITY + (
+                1.0 - BASE_REQUIRED_QUALITY
+            ) * retained_fraction
+        workflow.quality_violation = workflow.quality < self.quality_hard_floor
+        workflow.quality_accounted = True
+
+    def serve_capacity_pool(self, active: List[Flow], capacity: float) -> float:
         # Weighted max-min style allocation. It avoids wasting capacity when
         # small flows finish during the epoch.
         remaining_capacity = capacity
         candidates = list(active)
+        total_served = 0.0
         while candidates and remaining_capacity > 1e-9:
             weighted = [(flow, max(0.0, self.policy.flow_weight(flow, self))) for flow in candidates]
             total_weight = sum(weight for _, weight in weighted)
@@ -927,6 +1360,7 @@ class Simulator:
                 flow.served += served
                 self.total_served += served
                 served_this_round += served
+                total_served += served
                 progressed.append(flow)
             for flow in candidates:
                 if flow.remaining <= 1e-9 and flow.completed_at is None:
@@ -937,6 +1371,71 @@ class Simulator:
             if served_this_round <= 1e-12 or not progressed:
                 break
             candidates = next_candidates
+        return total_served
+
+    def serve_active_flows(self) -> None:
+        active = self.active_flows()
+        epoch_capacity = sum(self.path_capacities.values())
+        self.total_capacity += epoch_capacity
+        for path_id, capacity in self.path_capacities.items():
+            self.path_total_capacity[path_id] += capacity
+        if not active:
+            if self.network_model == "service_paths_borrowing":
+                for path_id, capacity in self.path_capacities.items():
+                    self.path_total_unused_after_lending[path_id] += capacity
+            return
+
+        # Keep this global pressure definition unchanged for Controller and
+        # historical avg_queue_pressure compatibility.
+        pressure = sum(flow.remaining for flow in active) / max(1.0, self.capacity)
+        self.queue_pressure_samples.append(pressure)
+
+        if self.network_model != "service_paths_borrowing":
+            for path_id, capacity in self.path_capacities.items():
+                path_active = [flow for flow in active if flow.path_id == path_id]
+                if not path_active:
+                    continue
+                path_pressure = sum(flow.remaining for flow in path_active) / max(1.0, capacity)
+                self.path_queue_pressure_samples[path_id].append(path_pressure)
+                served = self.serve_capacity_pool(path_active, capacity)
+                self.path_total_served[path_id] += served
+            return
+
+        base_served: Dict[str, float] = {}
+        spare_capacity: Dict[str, float] = {}
+        for path_id, capacity in self.path_capacities.items():
+            path_active = [flow for flow in active if flow.path_id == path_id]
+            if path_active:
+                path_pressure = sum(flow.remaining for flow in path_active) / max(1.0, capacity)
+                self.path_queue_pressure_samples[path_id].append(path_pressure)
+                served = self.serve_capacity_pool(path_active, capacity)
+            else:
+                served = 0.0
+            base_served[path_id] = served
+            spare_capacity[path_id] = max(0.0, capacity - served)
+            self.path_total_base_served[path_id] += served
+            self.path_total_home_flow_served[path_id] += served
+
+        borrow_candidates = [flow for flow in active if flow.remaining > 1e-9]
+        borrow_pool = sum(spare_capacity.values())
+        served_before = {flow.flow_id: flow.served for flow in borrow_candidates}
+        borrowed_total = self.serve_capacity_pool(borrow_candidates, borrow_pool)
+        for flow in borrow_candidates:
+            borrowed = flow.served - served_before[flow.flow_id]
+            if borrowed > 1e-12:
+                self.path_total_borrowed_received[flow.path_id] += borrowed
+                self.path_total_home_flow_served[flow.path_id] += borrowed
+
+        remaining_borrowed = borrowed_total
+        for path_id in self.path_capacities:
+            lent = min(spare_capacity[path_id], remaining_borrowed)
+            unused = spare_capacity[path_id] - lent
+            self.path_total_lent_served[path_id] += lent
+            self.path_total_unused_after_lending[path_id] += unused
+            self.path_total_served[path_id] += base_served[path_id] + lent
+            remaining_borrowed -= lent
+        if remaining_borrowed > 1e-8:
+            raise RuntimeError("borrowed service exceeds available path capacity")
 
     def workflow_reward(self, workflow: WorkflowRuntime) -> float:
         if workflow.complete_time is None:
@@ -946,12 +1445,17 @@ class Simulator:
         deadline_miss = 1.0 if latency > workflow.spec.deadline else 0.0
         wasted_norm = workflow.wasted_speculative_bytes / max(1.0, sum(b.size for b in workflow.spec.branches))
         quality_loss = 1.0 - workflow.quality
+        quality_gap = max(0.0, self.quality_target - workflow.quality)
+        quality_multiplier = float(
+            getattr(self.policy, "quality_lagrange_multiplier", 0.0)
+        )
         background_norm = workflow.background_bytes_served / max(1.0, sum(workflow.spec.background_sizes))
         return -(
             1.00 * normalized_latency
             + 3.00 * deadline_miss
             + 0.80 * wasted_norm
             + self.quality_weight * quality_loss
+            + quality_multiplier * quality_gap
             + 0.15 * background_norm
         )
 
@@ -976,6 +1480,12 @@ class Simulator:
         for workflow in self.workflows.values():
             if workflow.complete_time is None and workflow.stage != "not_arrived":
                 workflow.complete_time = self.max_time
+                self.finalize_quality_and_speculation(workflow)
+                for flow_id in workflow.background_flows:
+                    flow = self.flows[flow_id]
+                    workflow.background_bytes_served += flow.served
+                    if flow.completed_at is None:
+                        flow.cancelled = True
                 self.completed_workflows.append(workflow)
 
         return self.summary()
@@ -992,8 +1502,20 @@ class Simulator:
                     "deadline": workflow.spec.deadline,
                     "latency": latency,
                     "deadline_miss": 1 if latency > workflow.spec.deadline else 0,
+                    "predicted_quality": workflow.predicted_quality,
                     "quality": workflow.quality,
+                    "quality_target_met": 1
+                    if workflow.quality >= self.quality_target
+                    else 0,
                     "action": workflow.action or "none",
+                    "raw_action": workflow.raw_action or "none",
+                    "safe_action": workflow.safe_action or "none",
+                    "guard_overridden": 1 if workflow.guard_overridden else 0,
+                    "override_reason": workflow.override_reason,
+                    "quality_constraint_infeasible": (
+                        1 if workflow.quality_constraint_infeasible else 0
+                    ),
+                    "quality_violation": 1 if workflow.quality_violation else 0,
                     "decision_time": workflow.decision_time if workflow.decision_time is not None else "",
                     "decision_remaining_budget": workflow.decision_remaining_budget
                     if workflow.decision_remaining_budget is not None
@@ -1049,10 +1571,31 @@ class Simulator:
                     if workflow.decision_slack_ratio is not None
                     else "",
                     "decision_slack_bucket": workflow.decision_slack_bucket or "",
+                    "decision_required_path_pressure_ratio": (
+                        workflow.decision_required_path_pressure_ratio
+                        if workflow.decision_required_path_pressure_ratio is not None
+                        else ""
+                    ),
+                    "decision_required_path_pressure_bucket": (
+                        workflow.decision_required_path_pressure_bucket or ""
+                    ),
+                    "decision_optional_headroom_ratio": (
+                        workflow.decision_optional_headroom_ratio
+                        if workflow.decision_optional_headroom_ratio is not None
+                        else ""
+                    ),
+                    "decision_optional_headroom_bucket": (
+                        workflow.decision_optional_headroom_bucket or ""
+                    ),
                     "actual_remaining_latency": workflow.complete_time - workflow.decision_time
                     if workflow.decision_time is not None
                     else "",
                     "wasted_speculative_bytes": workflow.wasted_speculative_bytes,
+                    "useful_speculative_bytes": workflow.useful_speculative_bytes,
+                    "unused_speculative_bytes": workflow.unused_speculative_bytes,
+                    "retained_optional_count": workflow.retained_optional_count,
+                    "selected_optional_utility": workflow.selected_optional_utility,
+                    "total_optional_utility": workflow.total_optional_utility,
                     "background_bytes_served": workflow.background_bytes_served,
                 }
             )
@@ -1060,12 +1603,62 @@ class Simulator:
         completed = len(records)
         miss_ratio = sum(row["deadline_miss"] for row in records) / max(1, completed)
         total_wasted = sum(row["wasted_speculative_bytes"] for row in records)
+        total_useful = sum(row["useful_speculative_bytes"] for row in records)
+        total_unused = sum(row["unused_speculative_bytes"] for row in records)
         total_bg = sum(row["background_bytes_served"] for row in records)
         avg_quality = sum(row["quality"] for row in records) / max(1, completed)
+        quality_target_ratio = sum(row["quality_target_met"] for row in records) / max(1, completed)
+        quality_violation_ratio = sum(row["quality_violation"] for row in records) / max(
+            1,
+            completed,
+        )
+        guard_override_ratio = sum(row["guard_overridden"] for row in records) / max(
+            1,
+            completed,
+        )
+        infeasible_ratio = sum(
+            row["quality_constraint_infeasible"] for row in records
+        ) / max(1, completed)
+        path_records = [
+            {
+                "network_model": self.network_model,
+                "path_id": path_id,
+                "capacity": capacity,
+                "total_served": self.path_total_served[path_id],
+                "total_capacity": self.path_total_capacity[path_id],
+                "utilization": self.path_total_served[path_id]
+                / max(1.0, self.path_total_capacity[path_id]),
+                "avg_queue_pressure": statistics.mean(self.path_queue_pressure_samples[path_id])
+                if self.path_queue_pressure_samples[path_id]
+                else 0.0,
+            }
+            for path_id, capacity in self.path_capacities.items()
+        ]
+        path_borrowing_records = (
+            [
+                {
+                    "network_model": self.network_model,
+                    "path_id": path_id,
+                    "base_capacity": capacity,
+                    "base_served": self.path_total_base_served[path_id],
+                    "lent_served": self.path_total_lent_served[path_id],
+                    "borrowed_received": self.path_total_borrowed_received[path_id],
+                    "unused_after_lending": self.path_total_unused_after_lending[path_id],
+                    "total_home_flow_served": self.path_total_home_flow_served[path_id],
+                }
+                for path_id, capacity in self.path_capacities.items()
+            ]
+            if self.network_model == "service_paths_borrowing"
+            else []
+        )
         return {
             "policy": self.policy.name,
             "load": self.load,
             "seed": self.seed,
+            "action_coupling": self.action_coupling,
+            "quality_target": self.quality_target,
+            "quality_hard_floor": self.quality_hard_floor,
+            "safety_guard": "on" if self.safety_guard else "off",
             "slack_queue_basis": self.slack_queue_basis,
             "slack_queue_weight": self.slack_queue_weight,
             "completed": completed,
@@ -1074,12 +1667,21 @@ class Simulator:
             "p99_latency": percentile(latencies, 0.99),
             "deadline_miss_ratio": miss_ratio,
             "wasted_speculative_bytes_per_workflow": total_wasted / max(1, completed),
+            "useful_speculative_bytes_per_workflow": total_useful / max(1, completed),
+            "unused_speculative_bytes_per_workflow": total_unused / max(1, completed),
             "background_bytes_served_per_workflow": total_bg / max(1, completed),
             "avg_quality": avg_quality,
+            "quality_target_met_ratio": quality_target_ratio,
+            "quality_violation_ratio": quality_violation_ratio,
+            "guard_override_ratio": guard_override_ratio,
+            "quality_constraint_infeasible_ratio": infeasible_ratio,
             "link_utilization": self.total_served / max(1.0, self.total_capacity),
             "avg_queue_pressure": statistics.mean(self.queue_pressure_samples) if self.queue_pressure_samples else 0.0,
             "action_counts": dict(self.policy.action_counter),
+            "raw_action_counts": dict(self.policy.raw_action_counter),
             "workflow_records": records,
+            "path_records": path_records,
+            "path_borrowing_records": path_borrowing_records,
         }
 
 
@@ -1192,6 +1794,7 @@ def serialize_model_snapshot(snapshot: Dict[str, object]) -> Dict[str, object]:
     return {
         "q_values": {str(state): dict(values) for state, values in q_values.items()},
         "counts": {str(state): dict(values) for state, values in counts.items()},
+        "quality_lagrange_multiplier": snapshot.get("quality_lagrange_multiplier", 0.0),
     }
 
 
@@ -1206,7 +1809,13 @@ def summarize_training_window(summaries: List[Dict[str, object]]) -> Dict[str, o
         "p99_latency",
         "deadline_miss_ratio",
         "wasted_speculative_bytes_per_workflow",
+        "useful_speculative_bytes_per_workflow",
+        "unused_speculative_bytes_per_workflow",
         "avg_quality",
+        "quality_target_met_ratio",
+        "quality_violation_ratio",
+        "guard_override_ratio",
+        "quality_constraint_infeasible_ratio",
     )
     return {
         "episodes": len(summaries),
@@ -1241,6 +1850,11 @@ def policy_from_snapshot(
         learning_rate_min=source.learning_rate_min,
         slack_queue_basis=source.slack_queue_basis,
         slack_queue_weight=source.slack_queue_weight,
+        quality_target=source.quality_target,
+        quality_hard_floor=source.quality_hard_floor,
+        lambda_initial=source.quality_lagrange_multiplier,
+        lambda_learning_rate=source.lambda_learning_rate,
+        lambda_max=source.lambda_max,
     )
     policy.restore_snapshot(snapshot)
     policy.set_evaluation_mode()
@@ -1256,6 +1870,12 @@ def evaluate_training_checkpoint(
     max_time: int,
     validation_seed: int,
     validation_runs: int,
+    network_model: str = "single_bottleneck",
+    single_bottleneck_capacity: Optional[float] = None,
+    action_coupling: str = DEFAULT_ACTION_COUPLING,
+    quality_target: float = DEFAULT_QUALITY_TARGET,
+    quality_hard_floor: float = DEFAULT_QUALITY_HARD_FLOOR,
+    safety_guard: bool = False,
 ) -> Dict[str, object]:
     by_load: Dict[str, List[Dict[str, float]]] = defaultdict(list)
     run_rewards: List[float] = []
@@ -1274,6 +1894,12 @@ def evaluate_training_checkpoint(
                 quality_weight=source.quality_weight,
                 slack_queue_basis=source.slack_queue_basis,
                 slack_queue_weight=source.slack_queue_weight,
+                network_model=network_model,
+                single_bottleneck_capacity=single_bottleneck_capacity,
+                action_coupling=action_coupling,
+                quality_target=quality_target,
+                quality_hard_floor=quality_hard_floor,
+                safety_guard=safety_guard,
             )
             summary = sim.run()
             rewards = [sim.workflow_reward(workflow) for workflow in sim.completed_workflows]
@@ -1287,21 +1913,40 @@ def evaluate_training_checkpoint(
                     "wasted_speculative_bytes_per_workflow": float(
                         summary["wasted_speculative_bytes_per_workflow"]
                     ),
+                    "useful_speculative_bytes_per_workflow": float(
+                        summary["useful_speculative_bytes_per_workflow"]
+                    ),
                     "avg_quality": float(summary["avg_quality"]),
+                    "quality_target_met_ratio": float(summary["quality_target_met_ratio"]),
+                    "quality_violation_ratio": float(summary["quality_violation_ratio"]),
                 }
             )
 
+    load_metrics = {
+        load: {
+            metric: statistics.mean(item[metric] for item in items)
+            for metric in items[0]
+        }
+        for load, items in sorted(by_load.items())
+    }
+    max_quality_gap = max(
+        max(0.0, quality_target - float(metrics["avg_quality"]))
+        for metrics in load_metrics.values()
+    )
+    max_violation_ratio = max(
+        float(metrics["quality_violation_ratio"])
+        for metrics in load_metrics.values()
+    )
     return {
         "score": statistics.mean(run_rewards),
         "seed": validation_seed,
         "runs_per_load": validation_runs,
-        "loads": {
-            load: {
-                metric: statistics.mean(item[metric] for item in items)
-                for metric in items[0]
-            }
-            for load, items in sorted(by_load.items())
-        },
+        "quality_target": quality_target,
+        "quality_hard_floor": quality_hard_floor,
+        "constraint_feasible": max_quality_gap <= 1e-12 and max_violation_ratio <= 1e-12,
+        "max_quality_gap": max_quality_gap,
+        "max_quality_violation_ratio": max_violation_ratio,
+        "loads": load_metrics,
     }
 
 
@@ -1328,6 +1973,15 @@ def train_specnet_agent(
     checkpoint_eval_runs: int = 5,
     slack_queue_basis: str = DEFAULT_SLACK_QUEUE_BASIS,
     slack_queue_weight: float = DEFAULT_SLACK_QUEUE_WEIGHT,
+    network_model: str = "single_bottleneck",
+    single_bottleneck_capacity: Optional[float] = None,
+    action_coupling: str = DEFAULT_ACTION_COUPLING,
+    quality_target: float = DEFAULT_QUALITY_TARGET,
+    quality_hard_floor: float = DEFAULT_QUALITY_HARD_FLOOR,
+    safety_guard: bool = False,
+    lambda_initial: float = DEFAULT_LAMBDA_INITIAL,
+    lambda_learning_rate: float = DEFAULT_LAMBDA_LEARNING_RATE,
+    lambda_max: float = DEFAULT_LAMBDA_MAX,
 ) -> SpecNetAgentBanditPolicy:
     if episodes <= 0:
         raise ValueError("training episodes must be positive")
@@ -1335,6 +1989,10 @@ def train_specnet_agent(
         raise ValueError(f"unknown checkpoint selection: {checkpoint_selection}")
     if checkpoint_eval_runs <= 0:
         raise ValueError("checkpoint evaluation runs must be positive")
+    if network_model not in NETWORK_MODELS:
+        raise ValueError(f"unknown network model: {network_model}")
+    if action_coupling not in ACTION_COUPLING_MODES:
+        raise ValueError(f"unknown action coupling mode: {action_coupling}")
     policy = SpecNetAgentBanditPolicy(
         seed=seed,
         train=True,
@@ -1350,11 +2008,17 @@ def train_specnet_agent(
         learning_rate_min=learning_rate_min,
         slack_queue_basis=slack_queue_basis,
         slack_queue_weight=slack_queue_weight,
+        quality_target=quality_target,
+        quality_hard_floor=quality_hard_floor,
+        lambda_initial=lambda_initial,
+        lambda_learning_rate=lambda_learning_rate,
+        lambda_max=lambda_max,
     )
     requested_checkpoints = checkpoint_episodes or []
     checkpoints = sorted({episode for episode in requested_checkpoints if episode <= episodes} | {episodes})
     checkpoint_models: Dict[int, Dict[str, object]] = {}
     training_window: List[Dict[str, object]] = []
+    constraint_window: Dict[str, Dict[str, object]] = {}
     window_start_episode = 1
     for episode in range(episodes):
         policy.set_training_progress(episode, episodes)
@@ -1371,9 +2035,20 @@ def train_specnet_agent(
             quality_weight=quality_weight,
             slack_queue_basis=slack_queue_basis,
             slack_queue_weight=slack_queue_weight,
+            network_model=network_model,
+            single_bottleneck_capacity=single_bottleneck_capacity,
+            action_coupling=action_coupling,
+            quality_target=quality_target,
+            quality_hard_floor=quality_hard_floor,
+            safety_guard=safety_guard,
         )
-        training_window.append(sim.run())
+        episode_summary = sim.run()
+        training_window.append(episode_summary)
+        constraint_window[load] = episode_summary
         episode_number = episode + 1
+        if len(constraint_window) == len(loads):
+            policy.update_quality_multiplier(constraint_window, episode_number)
+            constraint_window = {}
         if episode_number in checkpoints:
             snapshot = policy.model_snapshot()
             checkpoint_models[episode_number] = snapshot
@@ -1404,11 +2079,32 @@ def train_specnet_agent(
                 max_time,
                 validation_seed,
                 checkpoint_eval_runs,
+                network_model,
+                single_bottleneck_capacity,
+                action_coupling,
+                quality_target,
+                quality_hard_floor,
+                safety_guard,
             )
-        selected_record = max(
-            policy.training_checkpoints,
-            key=lambda record: float(record["validation"]["score"]),
-        )
+        feasible_records = [
+            record
+            for record in policy.training_checkpoints
+            if bool(record["validation"]["constraint_feasible"])
+        ]
+        if feasible_records:
+            selected_record = max(
+                feasible_records,
+                key=lambda record: float(record["validation"]["score"]),
+            )
+        else:
+            selected_record = min(
+                policy.training_checkpoints,
+                key=lambda record: (
+                    float(record["validation"]["max_quality_gap"]),
+                    float(record["validation"]["max_quality_violation_ratio"]),
+                    -float(record["validation"]["score"]),
+                ),
+            )
         selected_episode = int(selected_record["episode"])
 
     policy.restore_snapshot(checkpoint_models[selected_episode])
@@ -1420,6 +2116,18 @@ def train_specnet_agent(
         "selected_checkpoint_episode": selected_episode,
         "validation_seed": validation_seed if checkpoint_selection == "best_validation" else None,
         "checkpoint_eval_runs": checkpoint_eval_runs if checkpoint_selection == "best_validation" else 0,
+        "quality_target": quality_target,
+        "quality_hard_floor": quality_hard_floor,
+        "safety_guard": "on" if safety_guard else "off",
+        "lambda_initial": lambda_initial,
+        "lambda_learning_rate": lambda_learning_rate,
+        "lambda_max": lambda_max,
+        "lambda_updates": policy.lambda_updates,
+        "selected_checkpoint_constraint_feasible": (
+            bool(selected_record["validation"]["constraint_feasible"])
+            if checkpoint_selection == "best_validation"
+            else None
+        ),
     }
     policy.set_evaluation_mode()
     return policy
@@ -1440,6 +2148,10 @@ def aggregate_summaries(summaries: List[Dict[str, object]]) -> List[Dict[str, ob
             "quality_weight": items[0].get("quality_weight", ""),
             "slack_queue_basis": items[0].get("slack_queue_basis", ""),
             "slack_queue_weight": items[0].get("slack_queue_weight", ""),
+            "action_coupling": items[0].get("action_coupling", ""),
+            "quality_target": items[0].get("quality_target", ""),
+            "quality_hard_floor": items[0].get("quality_hard_floor", ""),
+            "safety_guard": items[0].get("safety_guard", ""),
             "train_seed": items[0].get("train_seed", ""),
             "eval_seed": items[0].get("eval_seed", ""),
             "runs": len(items),
@@ -1451,8 +2163,14 @@ def aggregate_summaries(summaries: List[Dict[str, object]]) -> List[Dict[str, ob
             "p99_latency",
             "deadline_miss_ratio",
             "wasted_speculative_bytes_per_workflow",
+            "useful_speculative_bytes_per_workflow",
+            "unused_speculative_bytes_per_workflow",
             "background_bytes_served_per_workflow",
             "avg_quality",
+            "quality_target_met_ratio",
+            "quality_violation_ratio",
+            "guard_override_ratio",
+            "quality_constraint_infeasible_ratio",
             "link_utilization",
             "avg_queue_pressure",
         ]
@@ -1599,6 +2317,66 @@ def parse_args() -> argparse.Namespace:
         default="light,medium,heavy",
         help="Comma-separated loads to evaluate: light,medium,heavy.",
     )
+    parser.add_argument(
+        "--network-model",
+        choices=NETWORK_MODELS,
+        default="single_bottleneck",
+        help=(
+            "Network capacity model: one shared bottleneck, three fixed service paths, "
+            "or service paths with idle-capacity borrowing."
+        ),
+    )
+    parser.add_argument(
+        "--single-bottleneck-capacity",
+        type=float,
+        default=None,
+        help="Optional shared-link capacity override for single_bottleneck only (default: 16).",
+    )
+    parser.add_argument(
+        "--action-coupling",
+        choices=ACTION_COUPLING_MODES,
+        default=DEFAULT_ACTION_COUPLING,
+        help=(
+            "Use independent background scaling (decoupled), or reproduce the historical "
+            "action-to-background coupling (legacy)."
+        ),
+    )
+    parser.add_argument(
+        "--quality-target",
+        type=float,
+        default=DEFAULT_QUALITY_TARGET,
+        help="Fixed service-level average quality target; validation does not select it.",
+    )
+    parser.add_argument(
+        "--quality-hard-floor",
+        type=float,
+        default=DEFAULT_QUALITY_HARD_FLOOR,
+        help="Per-workflow quality floor enforced by the optional Safety Guard.",
+    )
+    parser.add_argument(
+        "--safety-guard",
+        choices=("off", "on"),
+        default="off",
+        help="Apply the per-workflow predicted-quality guard before executing an action.",
+    )
+    parser.add_argument(
+        "--lambda-initial",
+        type=float,
+        default=DEFAULT_LAMBDA_INITIAL,
+        help="Initial Lagrange multiplier for average-quality constraint violations.",
+    )
+    parser.add_argument(
+        "--lambda-learning-rate",
+        type=float,
+        default=DEFAULT_LAMBDA_LEARNING_RATE,
+        help="Window-level Lagrange multiplier update rate.",
+    )
+    parser.add_argument(
+        "--lambda-max",
+        type=float,
+        default=DEFAULT_LAMBDA_MAX,
+        help="Upper bound for the quality Lagrange multiplier.",
+    )
     return parser.parse_args()
 
 
@@ -1619,10 +2397,28 @@ def main() -> None:
         raise SystemExit(f"Invalid loads: {invalid_loads}")
     if args.slack_queue_weight < 0.0:
         raise SystemExit("--slack-queue-weight must be non-negative")
+    if not 0.0 <= args.quality_hard_floor <= args.quality_target <= 1.0:
+        raise SystemExit(
+            "quality constraints must satisfy 0 <= --quality-hard-floor "
+            "<= --quality-target <= 1"
+        )
+    if args.lambda_initial < 0.0 or args.lambda_learning_rate < 0.0 or args.lambda_max < 0.0:
+        raise SystemExit("lambda parameters must be non-negative")
+    if args.lambda_initial > args.lambda_max:
+        raise SystemExit("--lambda-initial must not exceed --lambda-max")
+    if args.single_bottleneck_capacity is not None:
+        if args.single_bottleneck_capacity <= 0.0:
+            raise SystemExit("--single-bottleneck-capacity must be positive")
+        if args.network_model != "single_bottleneck":
+            raise SystemExit(
+                "--single-bottleneck-capacity only applies to --network-model single_bottleneck"
+            )
 
     os.makedirs(args.output_dir, exist_ok=True)
+    safety_guard = args.safety_guard == "on"
     trained_policies: Dict[str, Tuple[float, int, str, SpecNetAgentBanditPolicy]] = {}
     trained_agent_rows: List[Dict[str, object]] = []
+    lambda_update_rows: List[Dict[str, object]] = []
     for train_seed in train_seeds:
         for quality_weight in quality_weights:
             for controller_variant in controller_variants:
@@ -1657,6 +2453,15 @@ def main() -> None:
                     checkpoint_eval_runs=args.checkpoint_eval_runs,
                     slack_queue_basis=args.slack_queue_basis,
                     slack_queue_weight=args.slack_queue_weight,
+                    network_model=args.network_model,
+                    single_bottleneck_capacity=args.single_bottleneck_capacity,
+                    action_coupling=args.action_coupling,
+                    quality_target=args.quality_target,
+                    quality_hard_floor=args.quality_hard_floor,
+                    safety_guard=safety_guard,
+                    lambda_initial=args.lambda_initial,
+                    lambda_learning_rate=args.lambda_learning_rate,
+                    lambda_max=args.lambda_max,
                 )
                 state_features = ",".join(CONTROLLER_VARIANT_FEATURES[controller_variant])
                 training_info = {
@@ -1666,6 +2471,17 @@ def main() -> None:
                     "quality_weight": quality_weight,
                     "slack_queue_basis": args.slack_queue_basis,
                     "slack_queue_weight": args.slack_queue_weight,
+                    "action_coupling": args.action_coupling,
+                    "quality_target": args.quality_target,
+                    "quality_hard_floor": args.quality_hard_floor,
+                    "safety_guard": args.safety_guard,
+                    "lambda_initial": args.lambda_initial,
+                    "lambda_learning_rate": args.lambda_learning_rate,
+                    "lambda_max": args.lambda_max,
+                    "quality_lagrange_multiplier": policy.quality_lagrange_multiplier,
+                    "selected_checkpoint_constraint_feasible": policy.training_info.get(
+                        "selected_checkpoint_constraint_feasible"
+                    ),
                     "train_seed": train_seed,
                     "eval_seed": eval_seed,
                     "train_episodes": args.train_episodes,
@@ -1697,6 +2513,30 @@ def main() -> None:
                 }
                 trained_policies[policy_name] = (quality_weight, train_seed, controller_variant, policy)
                 trained_agent_rows.append(training_info)
+                for update in policy.lambda_updates:
+                    quality_by_load = update["quality_by_load"]
+                    lambda_update_rows.append(
+                        {
+                            "policy": policy_name,
+                            "controller_variant": controller_variant,
+                            "quality_weight": quality_weight,
+                            "train_seed": train_seed,
+                            "network_model": args.network_model,
+                            "action_coupling": args.action_coupling,
+                            "safety_guard": args.safety_guard,
+                            "quality_target": args.quality_target,
+                            "episode": update["episode"],
+                            "updated": update["updated"],
+                            "missing_loads": ",".join(update["missing_loads"]),
+                            "light_avg_quality": quality_by_load.get("light", ""),
+                            "medium_avg_quality": quality_by_load.get("medium", ""),
+                            "heavy_avg_quality": quality_by_load.get("heavy", ""),
+                            "worst_load_quality": update["worst_load_quality"],
+                            "quality_gap": update["quality_gap"],
+                            "lambda_before": update["lambda_before"],
+                            "lambda_after": update["lambda_after"],
+                        }
+                    )
 
     policies = [
         "fifo",
@@ -1710,6 +2550,9 @@ def main() -> None:
     summaries: List[Dict[str, object]] = []
     workflow_rows: List[Dict[str, object]] = []
     action_rows: List[Dict[str, object]] = []
+    raw_action_rows: List[Dict[str, object]] = []
+    path_rows: List[Dict[str, object]] = []
+    path_borrowing_rows: List[Dict[str, object]] = []
 
     for load in loads:
         for run_index in range(args.eval_runs):
@@ -1737,6 +2580,12 @@ def main() -> None:
                     quality_weight=float(quality_weight) if quality_weight != "" else args.quality_weight,
                     slack_queue_basis=args.slack_queue_basis,
                     slack_queue_weight=args.slack_queue_weight,
+                    network_model=args.network_model,
+                    single_bottleneck_capacity=args.single_bottleneck_capacity,
+                    action_coupling=args.action_coupling,
+                    quality_target=args.quality_target,
+                    quality_hard_floor=args.quality_hard_floor,
+                    safety_guard=safety_guard,
                 )
                 summary = sim.run()
                 summary["policy"] = policy_name
@@ -1745,10 +2594,27 @@ def main() -> None:
                 summary["quality_weight"] = quality_weight
                 summary["slack_queue_basis"] = args.slack_queue_basis
                 summary["slack_queue_weight"] = args.slack_queue_weight
+                summary["action_coupling"] = args.action_coupling
+                summary["quality_target"] = args.quality_target
+                summary["quality_hard_floor"] = args.quality_hard_floor
+                summary["safety_guard"] = args.safety_guard
                 summary["train_seed"] = train_seed
                 summary["eval_seed"] = eval_seed
                 summary["run"] = run_index
-                summaries.append({k: v for k, v in summary.items() if k not in ("workflow_records", "action_counts")})
+                summaries.append(
+                    {
+                        k: v
+                        for k, v in summary.items()
+                        if k
+                        not in (
+                            "workflow_records",
+                            "action_counts",
+                            "raw_action_counts",
+                            "path_records",
+                            "path_borrowing_records",
+                        )
+                    }
+                )
                 for row in summary["workflow_records"]:
                     row_with_context = dict(row)
                     row_with_context.update(
@@ -1760,6 +2626,10 @@ def main() -> None:
                             "quality_weight": quality_weight,
                             "slack_queue_basis": args.slack_queue_basis,
                             "slack_queue_weight": args.slack_queue_weight,
+                            "action_coupling": args.action_coupling,
+                            "quality_target": args.quality_target,
+                            "quality_hard_floor": args.quality_hard_floor,
+                            "safety_guard": args.safety_guard,
                             "train_seed": train_seed,
                             "eval_seed": eval_seed,
                             "run": run_index,
@@ -1777,6 +2647,10 @@ def main() -> None:
                             "quality_weight": quality_weight,
                             "slack_queue_basis": args.slack_queue_basis,
                             "slack_queue_weight": args.slack_queue_weight,
+                            "action_coupling": args.action_coupling,
+                            "quality_target": args.quality_target,
+                            "quality_hard_floor": args.quality_hard_floor,
+                            "safety_guard": args.safety_guard,
                             "train_seed": train_seed,
                             "eval_seed": eval_seed,
                             "run": run_index,
@@ -1784,16 +2658,98 @@ def main() -> None:
                             "count": count,
                         }
                     )
+                for action, count in summary["raw_action_counts"].items():
+                    raw_action_rows.append(
+                        {
+                            "load": load,
+                            "policy": policy_name,
+                            "controller_variant": controller_variant,
+                            "state_features": state_features,
+                            "quality_weight": quality_weight,
+                            "slack_queue_basis": args.slack_queue_basis,
+                            "slack_queue_weight": args.slack_queue_weight,
+                            "action_coupling": args.action_coupling,
+                            "quality_target": args.quality_target,
+                            "quality_hard_floor": args.quality_hard_floor,
+                            "safety_guard": args.safety_guard,
+                            "train_seed": train_seed,
+                            "eval_seed": eval_seed,
+                            "run": run_index,
+                            "action": action,
+                            "count": count,
+                        }
+                    )
+                for path_record in summary["path_records"]:
+                    path_row = {
+                        "load": load,
+                        "policy": policy_name,
+                        "controller_variant": controller_variant,
+                        "state_features": state_features,
+                        "quality_weight": quality_weight,
+                        "slack_queue_basis": args.slack_queue_basis,
+                        "slack_queue_weight": args.slack_queue_weight,
+                        "train_seed": train_seed,
+                        "eval_seed": eval_seed,
+                        "run": run_index,
+                        "seed": workload_seed,
+                    }
+                    path_row.update(path_record)
+                    path_rows.append(path_row)
+                for borrowing_record in summary["path_borrowing_records"]:
+                    borrowing_row = {
+                        "load": load,
+                        "policy": policy_name,
+                        "controller_variant": controller_variant,
+                        "state_features": state_features,
+                        "quality_weight": quality_weight,
+                        "slack_queue_basis": args.slack_queue_basis,
+                        "slack_queue_weight": args.slack_queue_weight,
+                        "train_seed": train_seed,
+                        "eval_seed": eval_seed,
+                        "run": run_index,
+                        "seed": workload_seed,
+                    }
+                    borrowing_row.update(borrowing_record)
+                    path_borrowing_rows.append(borrowing_row)
 
     aggregate_rows = aggregate_summaries(summaries)
     write_csv(os.path.join(args.output_dir, "summary_by_run.csv"), summaries)
     write_csv(os.path.join(args.output_dir, "summary_aggregate.csv"), aggregate_rows)
     write_csv(os.path.join(args.output_dir, "workflow_results.csv"), workflow_rows)
     write_csv(os.path.join(args.output_dir, "action_counts.csv"), action_rows)
+    write_csv(os.path.join(args.output_dir, "raw_action_counts.csv"), raw_action_rows)
     write_csv(os.path.join(args.output_dir, "trained_agents.csv"), trained_agent_rows)
+    write_csv(os.path.join(args.output_dir, "lambda_updates.csv"), lambda_update_rows)
+    write_csv(os.path.join(args.output_dir, "path_results.csv"), path_rows)
+    write_csv(
+        os.path.join(args.output_dir, "path_borrowing_results.csv"),
+        path_borrowing_rows,
+    )
     write_json(
         os.path.join(args.output_dir, "specnet_agent_model.json"),
         {
+            "network_model": args.network_model,
+            "action_coupling": args.action_coupling,
+            "quality_constraints": {
+                "quality_target": args.quality_target,
+                "quality_hard_floor": args.quality_hard_floor,
+                "safety_guard": args.safety_guard,
+                "target_selected_by_validation": False,
+                "lambda_initial": args.lambda_initial,
+                "lambda_learning_rate": args.lambda_learning_rate,
+                "lambda_max": args.lambda_max,
+                "lambda_update_window": "one_complete_load_cycle",
+            },
+            **(
+                {"borrowing_enabled": True}
+                if args.network_model == "service_paths_borrowing"
+                else {}
+            ),
+            "path_capacities": (
+                {"shared": args.single_bottleneck_capacity or LOAD_CONFIG[loads[0]]["capacity"]}
+                if args.network_model == "single_bottleneck"
+                else {path_id: SERVICE_PATH_CAPACITY for path_id in SERVICE_PATH_ORDER}
+            ),
             "slack_estimator": SLACK_ESTIMATORS[args.slack_queue_basis],
             "slack_queue_basis": args.slack_queue_basis,
             "slack_queue_weight": args.slack_queue_weight,
