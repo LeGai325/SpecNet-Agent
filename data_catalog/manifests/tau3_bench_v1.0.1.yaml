@@ -1,0 +1,82 @@
+schema_version: 1
+dataset_id: tau2_bench
+display_name: tau3-bench
+retrieved_at: "2026-08-01"
+official_url: "https://github.com/sierra-research/tau2-bench"
+repository: "https://github.com/sierra-research/tau2-bench.git"
+tag: v1.0.1
+tag_object: "b711c1ead46f55111bf765cf44d5da8bacc2d28c"
+revision: "fc0055dc4e0a316c3f83133267fbd6faaa770992"
+license:
+  repository: MIT
+  license_sha256: "e67c5aa0074dfcaefd3c3a1aedb94cb539234aecd15d5a972574e3200e6252fe"
+access: public_code_and_precomputed_results
+stage1_preflight_completed: true
+phase2_use_approved: true
+phase2_scope: benchmark_adapter_regression_only
+paid_model_run_performed: false
+
+local_snapshot:
+  relative_path: "downloads/tau3_bench/v1.0.1/repo"
+  disk_usage_bytes: 901652480
+  git_tag_and_commit_verified: true
+
+stage1_sample:
+  sample_size: 100
+  sample_seed: 20260801
+  domains: {airline: 34, retail: 33, telecom: 33}
+  agent_model: gpt-4.1-mini-2025-04-14
+  user_model: gpt-4.1-2025-04-14
+  trials_per_task: 4
+
+selected_result_files:
+  - filename: data/tau2/results/final/gpt-4.1-mini-2025-04-14_airline_base_gpt-4.1-2025-04-14_4trials.json
+    bytes: 9781836
+    sha256: "41788956547a100fb8e34baf159f36dd1f07f0765798a5fdaf917576c5dba9d0"
+    available_simulations: 200
+    embedded_tasks: 50
+  - filename: data/tau2/results/final/gpt-4.1-mini-2025-04-14_retail_base_gpt-4.1-2025-04-14_4trials.json
+    bytes: 23697012
+    sha256: "6d6badb43b716adca31591b0b40e15fd493b49adddaa8e2c47035bb557549257"
+    available_simulations: 456
+    embedded_tasks: 114
+  - filename: data/tau2/results/final/gpt-4.1-mini-2025-04-14_telecom_base_gpt-4.1-2025-04-14_4trials.json
+    bytes: 51038687
+    sha256: "04fad1a6fb3ff8804be31c54cf5a993b64868e37683c226e014e7adbf60841d9"
+    available_simulations: 456
+    embedded_tasks: 114
+
+decision:
+  status: benchmark_only_conditional_accept
+  role: heldout_external_noncoding_tool_agent_evaluation
+  selected_scope: precomputed_text_trajectories_for_adapter_regression_only
+  not_for:
+    - controller_training
+    - checkpoint_selection
+    - workload_parameter_fitting
+    - natural_production_arrival
+    - explicit_parallel_dag
+    - real_deadline
+    - network_telemetry
+
+data_quality_notes:
+  - "100 条分层样本全部具有 simulation 关键字段和 message timestamp。"
+  - "1401 个 tool calls 均有同 ID 的 tool result，样本含 38 个 tool error。"
+  - "reward 同时覆盖成功和失败，只作为外部 benchmark 结果字段，不用于训练或 workload 校准。"
+  - "包含完整对话、工具参数和合成身份信息，不能直接提交 raw fixture。"
+  - "同一 domain/task_id 的四个 trials 必须进入同一 split。"
+  - "结果文件内嵌与轨迹对应的 tasks；仅在 adapter 回归时以内嵌 task 为准，避免版本错配。"
+  - "预计算轨迹不能作为 SpecNet 最终成绩；最终评估必须让 SpecNet 在固定任务上实际运行。"
+
+stage2_processed:
+  record_count: 1112
+  evaluation_units: 278
+  trials_per_evaluation_unit: 4
+  output_relative_path: "processed/tau3_benchmark_v1_0_1/precomputed_adapter_index.jsonl"
+  output_sha256: "222d7ed289ee507da6c56417c75fc9ad63b8c91581bde2c14d998f365fc772e8"
+  raw_conversation_or_tool_arguments_copied: false
+  tool_calls: 18782
+  matched_tool_results: 18751
+  incomplete_trajectories: 31
+  incomplete_reason: max_steps
+  current_blocker: specnet_to_tau3_runner_not_implemented

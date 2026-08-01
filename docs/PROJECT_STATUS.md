@@ -1,6 +1,6 @@
 # 当前项目状态
 
-更新时间：2026-07-30
+更新时间：2026-08-01
 
 ## 已实现
 
@@ -26,6 +26,8 @@
   optional headroom 表达多路径状态；原有 controller variant 保持兼容。
 - 固定平均质量目标 0.95 和单 workflow 硬下限 0.90；新增动作前 Safety Guard、
   完整负载周期级 λ 更新、约束感知 checkpoint 选择及 SpecNet Guard off/on 消融输出。
+- Trace-driven V2 数据侧管线：RAGPulse request adapter、tau3-bench metadata adapter、
+  固定 75/25 source mix 的 profile 构建、split 防泄漏校验与确定性抽样。
 - 渐进式 speculation admission、运行中追加与停止 branch 仍明确延期。
 
 ## 当前默认配置
@@ -49,6 +51,8 @@
 - `service_paths_borrowing` 只共享当前周期的剩余容量，不实现动态最短队列选路、flow
   迁移或逐跳路径。
 - 服务逻辑路径不是逐跳拓扑，不包含共享核心、ECMP 或路由变化。
+- `trace_driven_v2` 尚未注册为模拟器 workload；RAGPulse 的 step、duration、DAG、
+  deadline 和 telemetry 均保持缺失，tau3-bench runner 尚未实现。
 
 ## 合并时的约束
 
@@ -65,3 +69,4 @@
 3. 合并新的 speculative-pressure 信号。
 4. 在相同 reward、action 和 workload 下重新运行 Controller ablation。
 5. 在独立 PR 中评估 path-aware congestion 与 Slack，避免与本次调度改动混合。
+6. 在动态 DAG/映射语义确认后，以独立 PR 接入 `trace_driven_v2` 并做 paired preflight。

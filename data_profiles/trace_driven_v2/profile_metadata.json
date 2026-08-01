@@ -1,0 +1,17 @@
+{
+  "profile_id": "trace_driven_v2",
+  "schema_version": 2,
+  "generated_at": "2026-08-01",
+  "external_path": "processed/trace_driven_v2/profile.json",
+  "sha256": "4dbe8541f9ac8e6b901c165273e18cf169fe02f043d936b3125e622e272ceec2",
+  "bytes": 22249340,
+  "trace_source_mix": {
+    "tracelab": 0.75,
+    "ragpulse": 0.25
+  },
+  "arrival_source": "burstgpt_v2_natural_day_split",
+  "ragpulse_temporal_arrival_enabled": false,
+  "tau3_in_training_profile": false,
+  "simulator_integration_status": "deferred_until_stage4_after_repo_check",
+  "coverage_smoke_sha256": "cd6d430b9e225491316447a97ac587deb1e99912131170ac3a8887d79f67703f"
+}

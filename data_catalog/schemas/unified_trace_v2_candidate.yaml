@@ -1,0 +1,70 @@
+schema_version: 2
+status: stage3_profile_ready_simulator_deferred
+updated_at: "2026-08-01"
+
+provenance_values:
+  - real
+  - mapped
+  - simulated
+  - missing
+
+request_fields:
+  - {name: source_dataset, type: string, required: true}
+  - {name: source_version, type: string, required: true}
+  - {name: source_record_id, type: string, required: true}
+  - {name: session_id, type: string, required: false}
+  - {name: workflow_id, type: string, required: true}
+  - {name: task_id, type: string, required: false}
+  - {name: domain, type: string, required: false}
+  - {name: arrival_time_ms, type: float, required: false}
+  - {name: duration_ms, type: float, required: false}
+  - {name: input_tokens, type: integer, required: false}
+  - {name: output_tokens, type: integer, required: false}
+  - {name: success, type: boolean, required: false}
+  - {name: outcome_score, type: float, required: false}
+  - {name: error_type, type: string, required: false}
+
+step_fields:
+  - {name: step_id, type: string, required: true}
+  - {name: parent_step_ids, type: list_string, required: false}
+  - {name: step_index, type: integer, required: true}
+  - {name: role, type: string, required: false}
+  - {name: service_type, type: string, required: false}
+  - {name: tool_name, type: string, required: false}
+  - {name: start_time_ms, type: float, required: false}
+  - {name: end_time_ms, type: float, required: false}
+  - {name: duration_ms, type: float, required: false}
+  - {name: input_tokens, type: integer, required: false}
+  - {name: output_tokens, type: integer, required: false}
+  - {name: success, type: boolean, required: false}
+  - {name: error_type, type: string, required: false}
+
+auxiliary_fields:
+  - {name: retrieval_document_count, type: integer, required: false}
+  - {name: history_component_count, type: integer, required: false}
+  - {name: web_search_component_count, type: integer, required: false}
+  - {name: source_split_unit, type: string, required: true}
+  - {name: field_provenance, type: map_string, required: true}
+
+always_simulated_in_current_specnet:
+  - deadline_or_slo
+  - network_rtt
+  - network_loss_or_ecn
+  - queue_occupancy
+  - speculative_branch_outcome
+  - counterfactual_controller_action_result
+
+split_rules:
+  ragpulse: complete_session_id
+
+external_benchmarks:
+  tau3_bench:
+    split_unit: domain_and_task_id
+    usage: heldout_evaluation_only
+    allowed_in_training_profile: false
+
+notes:
+  - "tau3-bench 的 base/test task、trajectory 和 reward 不进入训练、checkpoint 选择或 workload 参数拟合。"
+  - "同一 tau3 task 的所有 trial 和 model variant 必须进入同一外部评估 split。"
+  - "RAGPulse timestamp 回绕处必须先分成逻辑窗口，再处理 arrival。"
+  - "没有明确 parent 的顺序日志只保留线性顺序，不创建未经证实的并行 DAG。"

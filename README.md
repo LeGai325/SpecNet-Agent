@@ -152,6 +152,13 @@ Role-aware Slack v2.1 候选可以通过以下参数显式启用：
 V2.1 改善了离线估计误差，但在 3-seed 运行时预实验中没有稳定超过 v2，因此目前
 不作为默认方案。
 
+## Trace-driven Workload V2
+
+仓库新增了 RAGPulse 训练侧适配、tau3-bench 外部评估适配、V2 profile 构建与确定性
+抽样。大型数据和生成 profile 保存在 Git 之外；当前 V2 仍是数据侧 profile，尚未接入
+模拟器或 Controller 训练。数据角色、复现命令和阶段四边界见
+[`docs/TRACE_DRIVEN_V2.md`](docs/TRACE_DRIVEN_V2.md)。
+
 ## 当前状态与已知限制
 
 - 训练已经支持 epsilon 衰减、按访问次数衰减学习率，以及独立 validation checkpoint
