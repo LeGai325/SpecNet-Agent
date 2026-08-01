@@ -4,10 +4,12 @@
 
 ## 当前状态
 
-V2 已完成数据适配、数据切分、profile 构建、校验和确定性抽样，但尚未注册为模拟器的
-`--workload-profile`。本次基于最新主线复核后，仍保持这一边界：主线已经具备简化多路径、
-质量约束和新版 Safety Guard，但动态 DAG、真实 QoS 队列、真实 telemetry 与 benchmark
-runner 尚未完成，当前不适合把缺失字段强行映射为“真实” workflow。
+V2-A 已注册为模拟器的 `--workload-profile trace_driven_v2`，并完成真实 profile smoke
+和 3-seed paired Pilot。它是“真实数据校准的固定模板模拟 workload”，不是完整真实回放。
+
+当前采用保守映射：TraceLab record 映射为 `coding`，RAGPulse record 映射为 `rag_qa`；
+两者都只使用原数据中可验证的 token、tool、runtime 或 retrieval 组成。deadline、网络
+排队、speculation 后果和缺失的 DAG 仍由模拟器生成并明确标为 simulated。
 
 ## 数据角色
 
@@ -41,6 +43,25 @@ ${SPECNET_DATA_ROOT}/processed/trace_driven_v2/profile.json
 ```
 
 仓库只保存适配代码、测试、schema、manifest 和 profile checksum 元数据。
+
+## 模拟器运行
+
+```bash
+python3 specnet_agent_experiments/specnet_agent_experiment.py \
+  --workload-profile trace_driven_v2 \
+  --trace-profile-path \
+    "$SPECNET_DATA_ROOT/processed/trace_driven_v2/profile.json" \
+  --output-dir outputs/trace_driven_v2_smoke \
+  --train-episodes 3 \
+  --eval-runs 1 \
+  --duration 800 \
+  --max-workflows 30 \
+  --max-time 2500
+```
+
+同一个 profile 会按 phase 使用互不重叠的 split：训练使用 `train`，checkpoint validation
+使用 `validation`，正式 evaluation 使用 `test`。输出的 `workflow_results.csv` 会记录
+profile、mode、record source、split、脱敏 record ID 和 mapping version。
 
 ## 构建和审计
 
@@ -79,8 +100,11 @@ python3 specnet_data/audit_trace_profile_v2.py \
 4dbe8541f9ac8e6b901c165273e18cf169fe02f043d936b3125e622e272ceec2
 ```
 
-## 下一步边界
+## 当前边界
 
-阶段四应另开功能 PR：先定义 RAG request 到现有固定模板或未来动态 DAG 的映射，再新增
-模拟器 CLI、paired preflight 和 Slack/Controller 实验。tau3 只有在 SpecNet-to-tau3
-runner 完成后才能作为最终外部评估，现有预计算轨迹只用于 adapter 回归。
+V2-B 仍需等待动态 DAG、真实 QoS queue、真实 telemetry 和多 control epoch 等模块。
+tau3 只有在 SpecNet-to-tau3 runner 完成后才能作为最终外部评估，现有预计算轨迹只用于
+adapter 回归。
+
+阶段四 Pilot 结果与正式实验门槛见
+[`TRACE_DRIVEN_V2_STAGE4_REPORT.md`](TRACE_DRIVEN_V2_STAGE4_REPORT.md)。

@@ -26,6 +26,16 @@ Planner -> required/speculative branches -> LLM -> Judge -> Complete
 - `Flow`：单条网络流的类型、角色、剩余工作量和完成状态。
 - `Simulator`：到达、flow 创建、链路调度、workflow 状态推进和指标统计。
 
+### Workload profile
+
+`--workload-profile` 支持 `synthetic`、`trace_driven_v1`、
+`trace_driven_v1_1` 和 `trace_driven_v2`。默认 `synthetic` 行为保持不变。
+
+V2-A 使用 BurstGPT arrival windows，并按冻结的 75/25 比例从 TraceLab 和 RAGPulse
+抽取记录。TraceLab 映射为固定 `coding` 模板，RAGPulse 映射为固定 `rag_qa` 模板；
+输出保留数据来源、phase split、脱敏 record ID 和 mapping version。真实 trace 没有的
+deadline、网络状态和 action 反事实仍由模拟器产生。
+
 ## Policy 和 Controller
 
 `Policy` 是所有策略的基类，主要扩展点是：

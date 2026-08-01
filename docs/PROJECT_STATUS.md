@@ -28,6 +28,8 @@
   完整负载周期级 λ 更新、约束感知 checkpoint 选择及 SpecNet Guard off/on 消融输出。
 - Trace-driven V2 数据侧管线：RAGPulse request adapter、tau3-bench metadata adapter、
   固定 75/25 source mix 的 profile 构建、split 防泄漏校验与确定性抽样。
+- Trace-driven V2-A 运行时：恢复 V1/V1.1 兼容入口，将 TraceLab 保守映射为 `coding`、
+  RAGPulse 映射为 `rag_qa`，并输出 source、mode、split 和 mapping provenance。
 - 渐进式 speculation admission、运行中追加与停止 branch 仍明确延期。
 
 ## 当前默认配置
@@ -51,8 +53,8 @@
 - `service_paths_borrowing` 只共享当前周期的剩余容量，不实现动态最短队列选路、flow
   迁移或逐跳路径。
 - 服务逻辑路径不是逐跳拓扑，不包含共享核心、ECMP 或路由变化。
-- `trace_driven_v2` 尚未注册为模拟器 workload；RAGPulse 的 step、duration、DAG、
-  deadline 和 telemetry 均保持缺失，tau3-bench runner 尚未实现。
+- `trace_driven_v2` 当前是固定模板 V2-A，不是动态 DAG 回放；RAGPulse 的 step、
+  duration、DAG、deadline 和 telemetry 均保持缺失，tau3-bench runner 尚未实现。
 
 ## 合并时的约束
 
@@ -69,4 +71,5 @@
 3. 合并新的 speculative-pressure 信号。
 4. 在相同 reward、action 和 workload 下重新运行 Controller ablation。
 5. 在独立 PR 中评估 path-aware congestion 与 Slack，避免与本次调度改动混合。
-6. 在动态 DAG/映射语义确认后，以独立 PR 接入 `trace_driven_v2` 并做 paired preflight。
+6. 使用 90-episode 稳定训练配置完成 V1.1/V2 paired preflight，再决定是否进入正式实验。
+7. 动态 DAG 等模块就绪后，再设计 V2-B 和 tau3 外部 benchmark runner。

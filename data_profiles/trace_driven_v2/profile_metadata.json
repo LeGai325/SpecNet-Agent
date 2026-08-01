@@ -12,6 +12,6 @@
   "arrival_source": "burstgpt_v2_natural_day_split",
   "ragpulse_temporal_arrival_enabled": false,
   "tau3_in_training_profile": false,
-  "simulator_integration_status": "deferred_until_stage4_after_repo_check",
+  "simulator_integration_status": "v2_a_fixed_template_pilot_complete",
   "coverage_smoke_sha256": "cd6d430b9e225491316447a97ac587deb1e99912131170ac3a8887d79f67703f"
 }
