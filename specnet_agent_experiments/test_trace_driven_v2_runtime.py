@@ -9,7 +9,7 @@ import unittest
 from collections import Counter
 from pathlib import Path
 
-import specnet_agent_experiment as experiment
+from specnet_agent_experiments import specnet_agent_experiment as experiment
 from specnet_data.trace_driven_v2 import load_profile
 
 

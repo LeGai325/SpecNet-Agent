@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import specnet_agent_experiment as experiment
+from specnet_agent_experiments import specnet_agent_experiment as experiment
 from specnet_data.build_trace_profile_v1 import burst_window_key
 from specnet_data.trace_driven_v1 import _select_arrivals, load_profile
 
