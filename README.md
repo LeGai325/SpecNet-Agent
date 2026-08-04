@@ -169,6 +169,8 @@ smoke/Pilot，但不应称为动态 DAG 或真实网络回放。数据角色、�
 [`docs/TRACE_DRIVEN_V3_FORMAL_REPORT.md`](docs/TRACE_DRIVEN_V3_FORMAL_REPORT.md)。
 团队成员首次准备数据时，先阅读
 [`docs/DATA_SETUP.md`](docs/DATA_SETUP.md)。
+私有仓库成员也可以直接运行 `python3 tools/install_trace_profiles.py`，安装仓库内置且经过
+checksum 校验的 V1/V2/V3 冻结 profile。
 
 ## 当前状态与已知限制
 

@@ -1,7 +1,21 @@
 # Trace-driven 数据准备与复现
 
 本文面向需要复用 V1/V2/V3 workload 的团队成员。Git 仓库只保存代码、manifest、schema、
-checksum 和轻量元数据；原始数据、处理后 profile 和完整实验输出统一放在仓库外。
+checksum、轻量元数据，以及供私有仓库成员直接使用的冻结 profile 压缩包；原始数据和完整
+实验输出仍统一放在仓库外。
+
+## 0. 私有仓库快速安装（推荐）
+
+只需运行实验、不需要重新审计原始数据时，在仓库根目录执行：
+
+```bash
+python3 tools/install_trace_profiles.py
+export SPECNET_DATA_ROOT="$PWD/external_agent_data"
+```
+
+安装脚本会从 `data_profiles/bundles/` 解压 V1/V2/V3 到 Git 忽略目录，并校验冻结
+checksum。此后可以直接跳到第 4 节运行 smoke。需要从公开原始数据重新生成 profile 时，
+再继续执行下面的完整流程。
 
 ## 1. 环境与目录
 
