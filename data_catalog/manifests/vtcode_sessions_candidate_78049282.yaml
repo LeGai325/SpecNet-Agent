@@ -1,0 +1,40 @@
+schema_version: 1
+dataset_id: vtcode_sessions
+status: rejected_as_workload_source
+retrieved_at: "2026-08-01"
+official_url: "https://huggingface.co/datasets/vinhnx90/vtcode-sessions"
+revision: "78049282e2b4fddb2a6d93a0a0e4784a7bd05fc1"
+license:
+  dataset: MIT
+access: public_ungated
+
+local_snapshot:
+  relative_path: "quarantine/vtcode_sessions/78049282/repo"
+  published_data_bytes: 21468595
+  raw_data_committed_to_git: false
+
+full_preflight:
+  published_files: 100
+  representations: {raw_session: 44, harness_export: 44, atif_export: 12}
+  approximate_unique_underlying_sessions: 45
+  raw_messages: 266
+  per_message_timestamps: 0
+  harness_events: 8479
+  per_harness_event_timestamps: 0
+  unique_tool_invocations: 22
+  paired_tool_outputs: 22
+  atif_steps: 85
+  timestamped_atif_steps: 85
+  completed_threads: 41
+  privacy_signal_counts: {home_path_like: 333, email_like: 0, api_key_like: 0}
+
+decision:
+  allowed_for_training_profile: false
+  adapter_development_planned: false
+  possible_future_use: atif_parser_format_reference_only
+  reasons:
+    - published_file_count_is_not_independent_session_count
+    - too_few_unique_tool_calls
+    - step_timing_missing_in_main_representations
+    - outcome_is_session_exit_not_task_quality
+    - single_workspace_provenance_and_best_effort_redaction

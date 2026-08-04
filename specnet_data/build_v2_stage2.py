@@ -28,7 +28,15 @@ from specnet_data.tau3_benchmark import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ragpulse-root", type=Path, required=True)
-    parser.add_argument("--tau-root", type=Path, required=True)
+    parser.add_argument(
+        "--tau-root",
+        type=Path,
+        default=None,
+        help=(
+            "Optional tau3-bench checkout used only to build a held-out adapter "
+            "index; it is not required for the V2/V3 training profiles."
+        ),
+    )
     parser.add_argument(
         "--data-root",
         type=Path,
@@ -89,7 +97,11 @@ def load_v1_comparison(
 def main() -> None:
     args = parse_args()
     ragpulse_records = adapt_ragpulse_records(args.ragpulse_root)
-    tau3_records = load_precomputed_benchmark(args.tau_root)
+    tau3_records = (
+        load_precomputed_benchmark(args.tau_root)
+        if args.tau_root is not None
+        else []
+    )
     ragpulse_summary = summarize_ragpulse(ragpulse_records)
 
     ragpulse_output = (
@@ -106,7 +118,8 @@ def main() -> None:
     )
     report_output = args.data_root / "reports" / "v2_stage2_analysis.json"
     write_ragpulse_jsonl(ragpulse_output, ragpulse_records)
-    write_tau3_jsonl(tau3_output, tau3_records)
+    if args.tau_root is not None:
+        write_tau3_jsonl(tau3_output, tau3_records)
 
     report = {
         "schema_version": 1,
@@ -115,7 +128,14 @@ def main() -> None:
             "ragpulse": ragpulse_summary,
         },
         "external_benchmark": {
-            "tau3_bench": summarize_benchmark(tau3_records),
+            "tau3_bench": (
+                summarize_benchmark(tau3_records)
+                if args.tau_root is not None
+                else {
+                    "available": False,
+                    "reason": "--tau-root was not supplied; training profile is unaffected",
+                }
+            ),
         },
         "separation_policy": {
             "tau3_present_in_training_output": False,
@@ -129,7 +149,9 @@ def main() -> None:
         ),
         "outputs": {
             "ragpulse_requests": str(ragpulse_output),
-            "tau3_adapter_index": str(tau3_output),
+            "tau3_adapter_index": (
+                str(tau3_output) if args.tau_root is not None else None
+            ),
         },
     }
     report_output.parent.mkdir(parents=True, exist_ok=True)

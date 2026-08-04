@@ -159,6 +159,17 @@ V2.1 改善了离线估计误差，但在 3-seed 运行时预实验中没有稳�
 smoke/Pilot，但不应称为动态 DAG 或真实网络回放。数据角色、复现命令和阶段四边界见
 [`docs/TRACE_DRIVEN_V2.md`](docs/TRACE_DRIVEN_V2.md)。
 
+## Trace-driven Workload V3 Candidate
+
+新增独立 `trace_driven_v3_candidate`：保持 BurstGPT arrival 和 25% RAG 场景份额不变，
+将 coding 份额均分给 TraceLab 与经过组件级防泄漏、时间清洗的 SWE-chat。该 profile 已
+通过 5-seed、90-episode、10-run 正式配对实验，可作为当前首选公开 trace-driven workload
+候选；它不覆盖 V2，也不改变默认 workload。构建与边界见
+[`docs/TRACE_DRIVEN_V3_CANDIDATE.md`](docs/TRACE_DRIVEN_V3_CANDIDATE.md)，正式结果见
+[`docs/TRACE_DRIVEN_V3_FORMAL_REPORT.md`](docs/TRACE_DRIVEN_V3_FORMAL_REPORT.md)。
+团队成员首次准备数据时，先阅读
+[`docs/DATA_SETUP.md`](docs/DATA_SETUP.md)。
+
 ## 当前状态与已知限制
 
 - 训练已经支持 epsilon 衰减、按访问次数衰减学习率，以及独立 validation checkpoint
@@ -172,6 +183,7 @@ smoke/Pilot，但不应称为动态 DAG 或真实网络回放。数据角色、�
 
 修改 Controller 语义前，请先阅读：
 
+- [`HANDOFF.md`](HANDOFF.md)
 - [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md)
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 

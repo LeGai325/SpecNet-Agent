@@ -1,0 +1,41 @@
+schema_version: 1
+dataset_id: tracelab
+retrieved_at: "2026-07-31"
+official_url: "https://github.com/uw-syfi/TraceLab"
+release: "v0.0.1"
+published_at: "2026-06-22T17:26:15Z"
+license:
+  data: CC-BY-4.0
+  code: Apache-2.0
+access: public_ungated
+full_download_approved: true
+preflight_completed: true
+
+files:
+  - filename: syfi_coding_trace.duckdb
+    bytes: 99889152
+    sha256: "97715265367cc72376475f5d444c8e1900b88cab1482aa7b9a742894d9f15619"
+    url: "https://github.com/uw-syfi/TraceLab/releases/download/v0.0.1/syfi_coding_trace.duckdb"
+    local_relative_path: "raw/tracelab/v0.0.1/syfi_coding_trace.duckdb"
+    downloaded: false
+  - filename: syfi_coding_trace.jsonl.gz
+    bytes: 53601226
+    sha256: "9d265eae69a31cae203848bea936f018148eed7ca8bf56050c5abe96da0b4e6b"
+    url: "https://github.com/uw-syfi/TraceLab/releases/download/v0.0.1/syfi_coding_trace.jsonl.gz"
+    local_relative_path: "raw/tracelab/v0.0.1/syfi_coding_trace.jsonl.gz"
+    downloaded: true
+    checksum_verified: true
+    parsed_rows: 357161
+    invalid_json_lines: 0
+
+download_plan:
+  full_analysis:
+    selected_file: syfi_coding_trace.jsonl.gz
+    expected_bytes: 53601226
+    avoid_duplicate_duckdb_download: true
+
+limitations:
+  - coding_agent_bias
+  - no_network_queue_or_rtt
+  - no_original_deadline
+  - public_trace_removes_tool_inputs

@@ -1,0 +1,43 @@
+schema_version: 1
+dataset_id: burstgpt
+retrieved_at: "2026-07-31"
+official_url: "https://github.com/HPMLL/BurstGPT"
+release: "v2.0"
+published_at: "2026-01-15T16:39:16Z"
+license:
+  data: CC-BY-4.0
+access: public_ungated
+full_download_approved: true
+preflight_completed: true
+
+files:
+  - filename: BurstGPT_1.csv
+    bytes: 52283111
+    sha256: "4bb3783693d0a435686fbfc885615d2349bd067239079fa4b749f2e679e12122"
+    url: "https://github.com/HPMLL/BurstGPT/releases/download/v2.0/BurstGPT_1.csv"
+  - filename: BurstGPT_2.csv
+    bytes: 144819209
+    sha256: "44bf5942b03fca42c01a226a545ad3a750ec62688faecd67b6831c56a8928bf7"
+    url: "https://github.com/HPMLL/BurstGPT/releases/download/v2.0/BurstGPT_2.csv"
+  - filename: BurstGPT_3.csv
+    bytes: 231682327
+    sha256: "2299986a07388aa303ec2c41d1131e756db650a39ed6ef9dfe7cc3d7f9a43b8f"
+    url: "https://github.com/HPMLL/BurstGPT/releases/download/v2.0/BurstGPT_3.csv"
+    local_relative_path: "raw/burstgpt/v2.0/BurstGPT_3.csv"
+    downloaded: true
+    checksum_verified: true
+    parsed_rows: 5344021
+
+download_plan:
+  full_analysis:
+    primary_selection:
+      - BurstGPT_3.csv
+    primary_expected_bytes: 231682327
+    rationale: "Trace 3 provides arrival, session, elapsed-time and token fields."
+
+limitations:
+  - no_agent_steps
+  - no_tool_calls
+  - no_workflow_dag
+  - no_network_queue_or_rtt
+  - session_id_and_elapsed_time_observed_only_in_trace_3

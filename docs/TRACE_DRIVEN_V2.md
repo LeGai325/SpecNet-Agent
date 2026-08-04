@@ -65,14 +65,17 @@ profile、mode、record source、split、脱敏 record ID 和 mapping version。
 
 ## 构建和审计
 
-先从固定版本的 RAGPulse 与 tau3 生成脱敏的阶段二产物：
+先从固定版本的 RAGPulse 生成脱敏的阶段二训练产物：
 
 ```bash
 python3 specnet_data/build_v2_stage2.py \
   --ragpulse-root "$SPECNET_DATA_ROOT/downloads/ragpulse/3672232d/repo" \
-  --tau-root "$SPECNET_DATA_ROOT/downloads/tau3_bench/v1.0.1/repo" \
   --data-root "$SPECNET_DATA_ROOT"
 ```
+
+tau3-bench 只用于未来 held-out adapter 回归，不进入 V2/V3 训练 profile。已经下载 tau3 时，
+可以额外传入 `--tau-root "$SPECNET_DATA_ROOT/downloads/tau3_bench/v1.0.1/repo"` 生成
+adapter index；没有 tau3 不会阻塞训练 profile 构建。
 
 再组合已有 V1 profile 和 RAGPulse request records：
 

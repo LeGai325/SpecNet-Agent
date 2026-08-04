@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "profile_id": "trace_driven_v3_candidate",
+  "generated_profile_bytes": 31417085,
+  "generated_profile_sha256": "926046f52a10ba4b4387fdca3755e092c6245fc922e4a1bee7d8cc472bd144e6",
+  "generated_profile_in_git": false,
+  "source_mix": {
+    "tracelab": 0.375,
+    "swe_chat": 0.375,
+    "ragpulse": 0.25
+  },
+  "sources": {
+    "tracelab": {"release": "v0.0.1"},
+    "burstgpt": {"release": "v2.0", "file": "BurstGPT_3.csv"},
+    "ragpulse": {"revision": "3672232d45d749fdcf45dbc38cc77e5264af4a32"},
+    "swe_chat": {"revision": "f66cca95b14caaa4177f7ed5eaa424608dadcffa"}
+  },
+  "swe_chat_records": {
+    "train": 3948,
+    "validation": 894,
+    "test": 875
+  },
+  "split_unit": "repo_user_connected_component",
+  "privacy": {
+    "contains_prompt_or_dialogue": false,
+    "contains_tool_arguments": false,
+    "contains_original_session_repo_or_user_id": false,
+    "identifier_form": "salted_hash"
+  }
+}

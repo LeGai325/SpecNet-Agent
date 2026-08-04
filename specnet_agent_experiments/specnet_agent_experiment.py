@@ -34,6 +34,10 @@ from specnet_data.trace_driven_v2 import (  # noqa: E402
     generate_trace_workload as generate_v2_trace_workload,
     resolve_profile_path as resolve_v2_profile_path,
 )
+from specnet_data.trace_driven_v3 import (  # noqa: E402
+    generate_trace_workload as generate_v3_trace_workload,
+    resolve_profile_path as resolve_v3_profile_path,
+)
 
 
 ACTIONS = ("full", "moderate", "conservative", "critical_only", "recovery")
@@ -42,6 +46,7 @@ WORKLOAD_PROFILES = (
     "trace_driven_v1",
     "trace_driven_v1_1",
     "trace_driven_v2",
+    "trace_driven_v3_candidate",
 )
 TRACE_WORKLOAD_PROFILES = frozenset(WORKLOAD_PROFILES[1:])
 DEFAULT_QUALITY_WEIGHTS = (0.5, 1.0, 1.6, 2.5, 4.0, 6.0)
@@ -435,6 +440,16 @@ def generate_workload(
     )
     if workload_profile == "trace_driven_v2":
         rows = generate_v2_trace_workload(
+            profile_path=trace_profile_path,
+            seed=seed,
+            load=load,
+            duration=duration,
+            max_workflows=max_workflows,
+            target_count=target_count,
+            phase=phase,
+        )
+    elif workload_profile == "trace_driven_v3_candidate":
+        rows = generate_v3_trace_workload(
             profile_path=trace_profile_path,
             seed=seed,
             load=load,
@@ -2592,11 +2607,12 @@ def main() -> None:
     multi_controller_variant = len(controller_variants) > 1
     trace_profile_path: Optional[str] = None
     if args.workload_profile in TRACE_WORKLOAD_PROFILES:
-        resolver = (
-            resolve_v2_profile_path
-            if args.workload_profile == "trace_driven_v2"
-            else resolve_v1_profile_path
-        )
+        resolver = {
+            "trace_driven_v1": resolve_v1_profile_path,
+            "trace_driven_v1_1": resolve_v1_profile_path,
+            "trace_driven_v2": resolve_v2_profile_path,
+            "trace_driven_v3_candidate": resolve_v3_profile_path,
+        }[args.workload_profile]
         try:
             trace_profile_path = str(
                 resolver(args.trace_profile_path or None)
