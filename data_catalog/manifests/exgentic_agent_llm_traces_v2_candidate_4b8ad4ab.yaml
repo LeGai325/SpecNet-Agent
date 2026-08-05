@@ -1,0 +1,35 @@
+schema_version: 1
+dataset_id: exgentic_agent_llm_traces_v2
+status: benchmark_replay_only
+observed_at: "2026-08-01"
+official_url: "https://huggingface.co/datasets/Exgentic/agent-llm-traces-v2"
+revision: "4b8ad4ab198438e5a170f9171c19c6a2cf7c1814"
+license:
+  dataset: not_declared_on_current_dataset_card
+access: public_ungated
+full_download_performed: false
+
+published_snapshot:
+  rows: 10056
+  compressed_bytes: 231729332
+  parquet_shards: 9
+  benchmark_count: 6
+  chat_spans: 241674
+  full_source_spans_before_filtering: 626278
+
+two_row_sample_preflight:
+  benchmark: appworld
+  spans: 46
+  timed_spans: 46
+  spans_with_parent_id: 46
+  spans_with_parent_present_in_published_row: 0
+
+decision:
+  role: heldout_benchmark_or_llm_replay_only
+  allowed_for_training_profile: false
+  full_download_planned: false
+  reasons:
+    - benchmark_generated_not_real_user_workload
+    - published_v2_keeps_chat_spans_only
+    - execute_tool_and_invoke_agent_spans_removed
+    - existing_tau3_assets_already_cover_heldout_tool_agent_evaluation

@@ -1,0 +1,58 @@
+schema_version: 1
+dataset_id: ragpulse
+source_revision: "3672232d45d749fdcf45dbc38cc77e5264af4a32"
+status: stage2_limited_accept
+
+record_unit: request
+split_unit: session_id
+
+mappings:
+  source_dataset: {value: ragpulse, provenance: mapped}
+  source_version: {value: "3672232d", provenance: mapped}
+  source_record_id: {source: line_index, transform: salted_hash, provenance: mapped}
+  session_id: {source: session_id, transform: salted_hash, provenance: mapped}
+  workflow_id: {source: request_record_id, provenance: mapped}
+  arrival_time_ms: {source: timestamp, transform: multiply_1000, provenance: mapped}
+  input_tokens: {source: input_length, provenance: real}
+  output_tokens: {source: output_length, provenance: real}
+  retrieval_document_count:
+    source: hash_ids.passages_ids
+    transform: list_length
+    provenance: mapped
+  history_component_count:
+    source: hash_ids.history
+    transform: list_length
+    provenance: mapped
+  web_search_component_count:
+    source: hash_ids.web_search
+    transform: list_length
+    provenance: mapped
+
+missing:
+  - agent_step_sequence
+  - tool_name
+  - component_duration
+  - success
+  - outcome_score
+  - real_deadline_or_slo
+  - network_telemetry
+
+timestamp_handling:
+  observed_negative_gaps: 1
+  logical_windows:
+    - {rows: 3800, min_seconds: 82, max_seconds: 604453}
+    - {rows: 3306, min_seconds: 0, max_seconds: 604603}
+  rule: split_at_negative_gap_before_any_sort_or_gap_calculation
+  limitation: "官方说明为一周 trace，但文件包含两个近一周时间窗口，原因未说明。"
+
+privacy:
+  raw_text_present: false
+  identifiers: remapped_or_pseudonymous
+  fixture_policy: numeric_metadata_only
+
+stage2_output:
+  record_unit: request
+  path: processed/unified_trace_v2/ragpulse_requests.jsonl
+  raw_session_id_retained: false
+  raw_text_retained: false
+  fit_boundary: rag_request_and_load_supplement_not_complete_agent_workflow

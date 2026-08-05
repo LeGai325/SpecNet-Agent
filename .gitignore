@@ -12,6 +12,10 @@ venv/
 
 # Generated experiment data and figures
 outputs/
+external_agent_data/
+data_catalog/raw/
+data_catalog/processed/
+data_profiles/*/profile.json
 data_snapshot/
 artifacts_snapshot/
 figures/

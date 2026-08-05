@@ -1,0 +1,67 @@
+schema_version: 1
+mapping_id: swe_chat_v3_candidate_a
+source:
+  dataset_id: SALT-NLP/SWE-chat
+  revision: f66cca95b14caaa4177f7ed5eaa424608dadcffa
+target:
+  profile_id: trace_driven_v3_candidate
+  fixed_template: coding
+
+split_policy:
+  deduplicate_first: content_hash
+  isolation_unit: repo_user_connected_component
+  ratios: {train: 0.70, validation: 0.15, test: 0.15}
+  exported_identifiers: salted_hash_only
+
+field_mapping:
+  workflow_identity:
+    source: session_id
+    target: sample_id
+    transform: salted_sha256_prefix
+  task_size:
+    source: [input_tokens, output_tokens, turn_count]
+    target: [planner_size, llm_size, judge_size]
+    transform: bounded_monotonic_scaling
+  service_mix:
+    source: [tool_name, category]
+    target: branch_service_type
+    values: [retrieval, tool, storage, llm]
+  service_size:
+    source: paired_tool_use_result_interval
+    target: branch_size
+    transform: bounded_monotonic_scaling
+  arrival:
+    source: BurstGPT_3_v2_windows
+    target: arrival_time
+  deadline:
+    source: simulator_candidate_mapping
+    target: deadline
+
+time_cleaning:
+  require_same_tool_call_id_pair: true
+  require_nonnegative_interval: true
+  idle_gap_threshold_ms: 300000
+  above_threshold_policy: exclude_from_timing_calibration
+  raw_session_duration_as_service_time: false
+  retain_agent_specific_coverage: true
+  missing_timing_fallback: simulator_service_anchor_not_cross_agent_imputation
+
+not_inferred:
+  - semantic_dynamic_dag_parent_edges
+  - ground_truth_task_quality
+  - real_deadline_or_slo
+  - network_rtt_loss_ecn_or_queue
+  - controller_action_counterfactual
+
+auxiliary_only:
+  - session_success
+  - session_duration_seconds
+
+privacy:
+  exported_raw_conversation_text: false
+  exported_tool_arguments_or_paths: false
+  exported_session_repo_user_ids: false
+
+known_split_limit:
+  cross_source_repo_overlap_check: unavailable
+  reason: TraceLab profile does not expose comparable repo identity

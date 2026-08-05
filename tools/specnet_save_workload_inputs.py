@@ -30,6 +30,8 @@ def main() -> None:
     parser.add_argument("--duration", type=int, default=2600)
     parser.add_argument("--max-workflows", type=int, default=120)
     parser.add_argument("--loads", default="light,medium,heavy")
+    parser.add_argument("--workload-profile", default="synthetic")
+    parser.add_argument("--trace-profile-path", default="")
     args = parser.parse_args()
 
     module = load_experiment_module(args.script)
@@ -46,6 +48,9 @@ def main() -> None:
                 load,
                 args.duration,
                 args.max_workflows,
+                workload_profile=args.workload_profile,
+                phase="test",
+                trace_profile_path=args.trace_profile_path or None,
             )
             filename = f"workload_{load}_run_{run_index}_seed_{workload_seed}.jsonl"
             path = os.path.join(args.output_dir, filename)
@@ -58,6 +63,8 @@ def main() -> None:
                     "run": run_index,
                     "seed": workload_seed,
                     "workflows": len(specs),
+                    "workload_profile": args.workload_profile,
+                    "trace_profile_path": args.trace_profile_path,
                     "file": filename,
                 }
             )

@@ -1,0 +1,40 @@
+schema_version: 1
+dataset_id: trace_commons_agent_traces
+status: limited_accept_validation_only
+retrieved_at: "2026-08-01"
+official_url: "https://huggingface.co/datasets/trace-commons/agent-traces"
+revision: "112ebd4d03ce852b00e935d523107c3d0c9a65bf"
+license:
+  compilation: CC-BY-4.0
+  embedded_content: upstream_licenses_may_apply
+access: public_ungated
+
+local_snapshot:
+  relative_path: "quarantine/trace_commons/112ebd4d03ce852b00e935d523107c3d0c9a65bf/train.parquet"
+  bytes: 70202603
+  sha256: "7c2c6ee4342ff014c47b906425501b4dc4f368df8af5280c158e827944da11e7"
+  raw_data_committed_to_git: false
+
+full_preflight:
+  rows: 30
+  trace_events: 18012
+  timestamp_coverage: 0.7852542749278258
+  parent_links: 13461
+  internal_parent_link_coverage: 1.0
+  declared_tool_calls: 4264
+  paired_tool_calls: 4262
+  tool_pair_coverage: 0.9995309568480301
+  tool_duration_ms: {p50: 1061.0, p95: 26067.0, p99: 124650.0, max: 8235799.0}
+  labeled_harnesses: {claude_code: 28, missing: 2}
+  privacy_signal_counts: {home_path_like: 6136, email_like: 0, api_key_like: 0}
+
+decision:
+  priority: P1
+  role: parser_regression_parent_and_tool_duration_tail_validation
+  allowed_for_training_profile: false
+  quarantine_required: true
+  reasons:
+    - only_30_voluntary_opt_in_sessions
+    - current_snapshot_lacks_real_harness_diversity
+    - session_duration_contains_long_pause_or_resume_gaps
+    - best_effort_anonymization_only

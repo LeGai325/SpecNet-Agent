@@ -1,0 +1,81 @@
+schema_version: 1
+dataset_id: tau2_bench
+display_name: tau3-bench
+source_tag: v1.0.1
+source_commit: "fc0055dc4e0a316c3f83133267fbd6faaa770992"
+status: stage2_benchmark_adapter_ready_runner_pending
+
+record_unit: simulation_trajectory
+split_unit: domain_and_task_id
+
+mappings:
+  source_dataset: {value: tau3_bench, provenance: mapped}
+  source_version: {value: v1.0.1, provenance: mapped}
+  source_record_id: {source: simulation.id, provenance: real}
+  session_id: {source: simulation.id, provenance: mapped}
+  workflow_id: {source: simulation.id, provenance: mapped}
+  task_id: {source: simulation.task_id, provenance: real}
+  domain: {source: result.info.environment_info.domain_name, provenance: real}
+  duration_ms: {source: simulation.duration, transform: multiply_1000, provenance: mapped}
+  success: {source: simulation.reward_info.reward, transform: equals_1, provenance: mapped}
+  outcome_score: {source: simulation.reward_info.reward, provenance: real}
+  step_id: {source: message.turn_idx, provenance: mapped}
+  step_index: {source: message.turn_idx, provenance: real}
+  role: {source: message.role, provenance: real}
+  tool_name: {source: message.tool_calls.name, provenance: real}
+  start_time_ms: {source: message.timestamp, transform: iso8601_to_epoch_ms, provenance: mapped}
+  input_tokens: {source: message.usage.prompt_tokens, provenance: real}
+  output_tokens: {source: message.usage.completion_tokens, provenance: real}
+  error_type: {source: tool_message.error, provenance: mapped}
+
+structure_rules:
+  sequence_available: true
+  tool_call_result_link: tool_call.id_to_tool_message.id
+  explicit_parent_step_ids_available: false
+  fallback: linear_sequence_plus_tool_call_result_edge
+  no_parallel_dag_inference: true
+
+usage_policy:
+  allowed:
+    - schema_inspection
+    - benchmark_adapter_regression
+    - heldout_external_evaluation
+  forbidden:
+    - unified_training_profile
+    - controller_training
+    - checkpoint_selection
+    - workload_parameter_fitting
+
+selected_adapter_regression_inputs:
+  agent_model: gpt-4.1-mini-2025-04-14
+  user_model: gpt-4.1-2025-04-14
+  domains: [airline, retail, telecom]
+  trials_per_task: 4
+  reason: "官方仓库已有三领域预计算轨迹，无需本阶段调用付费模型。"
+
+missing:
+  - natural_production_arrival_process
+  - explicit_parent_step_ids
+  - real_deadline_or_slo
+  - network_telemetry
+  - counterfactual_controller_actions
+
+interpretation_limits:
+  - "duration 是 benchmark 执行时间，不是生产服务时间分布。"
+  - "任务和用户由 benchmark 模拟，不是生产用户日志。"
+  - "同一 task 的四个 trials 不得跨 split。"
+  - "官方预计算 trajectory 只验证 adapter；最终外部评估必须实际运行 SpecNet。"
+
+privacy:
+  full_conversation_text_present: true
+  tool_arguments_and_results_present: true
+  identities_are_synthetic_but_raw_fixture_allowed: false
+  fixture_policy: aggregate_or_sanitized_numeric_only
+
+stage2_output:
+  record_unit: sanitized_trajectory_metadata
+  path: processed/tau3_benchmark_v1_0_1/precomputed_adapter_index.jsonl
+  conversation_text_retained: false
+  tool_arguments_or_results_retained: false
+  allowed_result_claim: adapter_regression_only
+  final_specnet_evaluation_requires_live_runner: true

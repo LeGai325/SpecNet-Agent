@@ -16,12 +16,39 @@ import math
 import os
 import random
 import statistics
+import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from specnet_data.trace_driven_v1 import (  # noqa: E402
+    generate_trace_workload as generate_v1_trace_workload,
+    resolve_profile_path as resolve_v1_profile_path,
+)
+from specnet_data.trace_driven_v2 import (  # noqa: E402
+    generate_trace_workload as generate_v2_trace_workload,
+    resolve_profile_path as resolve_v2_profile_path,
+)
+from specnet_data.trace_driven_v3 import (  # noqa: E402
+    generate_trace_workload as generate_v3_trace_workload,
+    resolve_profile_path as resolve_v3_profile_path,
+)
+
+
 ACTIONS = ("full", "moderate", "conservative", "critical_only", "recovery")
+WORKLOAD_PROFILES = (
+    "synthetic",
+    "trace_driven_v1",
+    "trace_driven_v1_1",
+    "trace_driven_v2",
+    "trace_driven_v3_candidate",
+)
+TRACE_WORKLOAD_PROFILES = frozenset(WORKLOAD_PROFILES[1:])
 DEFAULT_QUALITY_WEIGHTS = (0.5, 1.0, 1.6, 2.5, 4.0, 6.0)
 DEFAULT_QUALITY_HARD_FLOOR = 0.90
 DEFAULT_LAMBDA_INITIAL = 0.0
@@ -199,6 +226,12 @@ class WorkflowSpec:
     llm_size: float
     judge_size: float
     background_sizes: List[float]
+    workload_profile: str = "synthetic"
+    workload_source: str = "synthetic"
+    record_source: str = "synthetic"
+    source_split: str = "synthetic"
+    source_record_id: str = ""
+    mapping_version: str = "synthetic_v1"
 
 
 @dataclass
@@ -316,7 +349,7 @@ def optional_branch_value(service_type: str, optional_rank: int) -> Tuple[float,
     return selection_probability, expected_utility
 
 
-def generate_workload(
+def generate_synthetic_workload(
     seed: int,
     load: str,
     duration: int,
@@ -384,6 +417,109 @@ def generate_workload(
         )
         workflow_id += 1
 
+    return specs
+
+
+def generate_workload(
+    seed: int,
+    load: str,
+    duration: int,
+    max_workflows: int,
+    workload_profile: str = "synthetic",
+    phase: str = "train",
+    trace_profile_path: Optional[str] = None,
+) -> List[WorkflowSpec]:
+    if workload_profile == "synthetic":
+        return generate_synthetic_workload(seed, load, duration, max_workflows)
+    if workload_profile not in TRACE_WORKLOAD_PROFILES:
+        raise ValueError(f"unknown workload profile: {workload_profile}")
+
+    target_count = min(
+        max_workflows,
+        max(1, int(round(duration / LOAD_CONFIG[load]["mean_interarrival"]))),
+    )
+    if workload_profile == "trace_driven_v2":
+        rows = generate_v2_trace_workload(
+            profile_path=trace_profile_path,
+            seed=seed,
+            load=load,
+            duration=duration,
+            max_workflows=max_workflows,
+            target_count=target_count,
+            phase=phase,
+        )
+    elif workload_profile == "trace_driven_v3_candidate":
+        rows = generate_v3_trace_workload(
+            profile_path=trace_profile_path,
+            seed=seed,
+            load=load,
+            duration=duration,
+            max_workflows=max_workflows,
+            target_count=target_count,
+            phase=phase,
+        )
+    else:
+        rows = generate_v1_trace_workload(
+            profile_path=trace_profile_path,
+            seed=seed,
+            load=load,
+            duration=duration,
+            max_workflows=max_workflows,
+            target_count=target_count,
+            phase=phase,
+            fill_to_target=workload_profile == "trace_driven_v1_1",
+        )
+
+    specs: List[WorkflowSpec] = []
+    for row in rows:
+        branches: List[BranchSpec] = []
+        optional_rank = 0
+        for branch_index, branch in enumerate(row["branches"]):
+            required = bool(branch["required"])
+            if required:
+                selection_probability = 1.0
+                expected_utility = 0.0
+            else:
+                selection_probability, expected_utility = optional_branch_value(
+                    str(branch["service_type"]),
+                    optional_rank,
+                )
+                optional_rank += 1
+            branches.append(
+                BranchSpec(
+                    service_type=str(branch["service_type"]),
+                    size=float(branch["size"]),
+                    required=required,
+                    branch_index=branch_index,
+                    selection_probability=selection_probability,
+                    expected_utility=expected_utility,
+                )
+            )
+        specs.append(
+            WorkflowSpec(
+                workflow_id=int(row["workflow_id"]),
+                arrival_time=int(row["arrival_time"]),
+                template=str(row["template"]),
+                deadline=float(row["deadline"]),
+                planner_size=float(row["planner_size"]),
+                branches=branches,
+                llm_size=float(row["llm_size"]),
+                judge_size=float(row["judge_size"]),
+                background_sizes=[
+                    float(value) for value in row["background_sizes"]
+                ],
+                workload_profile=workload_profile,
+                workload_source=str(row.get("workload_source", "trace")),
+                record_source=str(
+                    row.get("record_source", "tracelab")
+                ),
+                source_split=str(row["source_split"]),
+                source_record_id=str(row["source_record_id"]),
+                mapping_version=str(
+                    row.get("mapping_version", "fixed_template_v1")
+                ),
+            )
+        )
     return specs
 
 
@@ -1498,6 +1634,37 @@ class Simulator:
                 {
                     "workflow_id": workflow.spec.workflow_id,
                     "template": workflow.spec.template,
+                    "workload_profile": workflow.spec.workload_profile,
+                    "workload_source": workflow.spec.workload_source,
+                    "record_source": workflow.spec.record_source,
+                    "source_split": workflow.spec.source_split,
+                    "source_record_id": workflow.spec.source_record_id,
+                    "mapping_version": workflow.spec.mapping_version,
+                    "branch_count": len(workflow.spec.branches),
+                    "required_branch_count": sum(
+                        branch.required for branch in workflow.spec.branches
+                    ),
+                    "planner_work": workflow.spec.planner_size,
+                    "required_branch_work": sum(
+                        branch.size
+                        for branch in workflow.spec.branches
+                        if branch.required
+                    ),
+                    "optional_branch_work": sum(
+                        branch.size
+                        for branch in workflow.spec.branches
+                        if not branch.required
+                    ),
+                    "llm_work": workflow.spec.llm_size,
+                    "judge_work": workflow.spec.judge_size,
+                    "background_work": sum(workflow.spec.background_sizes),
+                    "total_declared_work": (
+                        workflow.spec.planner_size
+                        + sum(branch.size for branch in workflow.spec.branches)
+                        + workflow.spec.llm_size
+                        + workflow.spec.judge_size
+                        + sum(workflow.spec.background_sizes)
+                    ),
                     "arrival_time": workflow.spec.arrival_time,
                     "deadline": workflow.spec.deadline,
                     "latency": latency,
@@ -1876,13 +2043,23 @@ def evaluate_training_checkpoint(
     quality_target: float = DEFAULT_QUALITY_TARGET,
     quality_hard_floor: float = DEFAULT_QUALITY_HARD_FLOOR,
     safety_guard: bool = False,
+    workload_profile: str = "synthetic",
+    trace_profile_path: Optional[str] = None,
 ) -> Dict[str, object]:
     by_load: Dict[str, List[Dict[str, float]]] = defaultdict(list)
     run_rewards: List[float] = []
     for load_index, load in enumerate(loads):
         for run_index in range(validation_runs):
             workload_seed = validation_seed + 30000 + 1000 * run_index + 17 * load_index
-            specs = generate_workload(workload_seed, load, duration, max_workflows)
+            specs = generate_workload(
+                workload_seed,
+                load,
+                duration,
+                max_workflows,
+                workload_profile=workload_profile,
+                phase="validation",
+                trace_profile_path=trace_profile_path,
+            )
             policy = policy_from_snapshot(source, snapshot, workload_seed)
             sim = Simulator(
                 specs,
@@ -1982,6 +2159,8 @@ def train_specnet_agent(
     lambda_initial: float = DEFAULT_LAMBDA_INITIAL,
     lambda_learning_rate: float = DEFAULT_LAMBDA_LEARNING_RATE,
     lambda_max: float = DEFAULT_LAMBDA_MAX,
+    workload_profile: str = "synthetic",
+    trace_profile_path: Optional[str] = None,
 ) -> SpecNetAgentBanditPolicy:
     if episodes <= 0:
         raise ValueError("training episodes must be positive")
@@ -2024,7 +2203,15 @@ def train_specnet_agent(
         policy.set_training_progress(episode, episodes)
         load = loads[episode % len(loads)]
         workload_seed = seed + 10000 + episode
-        specs = generate_workload(workload_seed, load, duration, max_workflows)
+        specs = generate_workload(
+            workload_seed,
+            load,
+            duration,
+            max_workflows,
+            workload_profile=workload_profile,
+            phase="train",
+            trace_profile_path=trace_profile_path,
+        )
         sim = Simulator(
             specs,
             policy,
@@ -2085,6 +2272,8 @@ def train_specnet_agent(
                 quality_target,
                 quality_hard_floor,
                 safety_guard,
+                workload_profile,
+                trace_profile_path,
             )
         feasible_records = [
             record
@@ -2123,6 +2312,12 @@ def train_specnet_agent(
         "lambda_learning_rate": lambda_learning_rate,
         "lambda_max": lambda_max,
         "lambda_updates": policy.lambda_updates,
+        "workload_profile": workload_profile,
+        "trace_profile_path": (
+            trace_profile_path
+            if workload_profile in TRACE_WORKLOAD_PROFILES
+            else None
+        ),
         "selected_checkpoint_constraint_feasible": (
             bool(selected_record["validation"]["constraint_feasible"])
             if checkpoint_selection == "best_validation"
@@ -2152,6 +2347,7 @@ def aggregate_summaries(summaries: List[Dict[str, object]]) -> List[Dict[str, ob
             "quality_target": items[0].get("quality_target", ""),
             "quality_hard_floor": items[0].get("quality_hard_floor", ""),
             "safety_guard": items[0].get("safety_guard", ""),
+            "workload_profile": items[0].get("workload_profile", "synthetic"),
             "train_seed": items[0].get("train_seed", ""),
             "eval_seed": items[0].get("eval_seed", ""),
             "runs": len(items),
@@ -2202,6 +2398,23 @@ def parse_args() -> argparse.Namespace:
     default_quality_weights_text = ",".join(str(weight) for weight in DEFAULT_QUALITY_WEIGHTS)
     parser = argparse.ArgumentParser(description="Run SpecNet-Agent simulation experiments.")
     parser.add_argument("--output-dir", default="specnet_agent_experiments/results", help="Directory for CSV/JSON outputs.")
+    parser.add_argument(
+        "--workload-profile",
+        choices=WORKLOAD_PROFILES,
+        default="synthetic",
+        help=(
+            "Workload generator used consistently for training, checkpoint "
+            "validation, and evaluation."
+        ),
+    )
+    parser.add_argument(
+        "--trace-profile-path",
+        default="",
+        help=(
+            "Profile JSON for the selected trace workload. When omitted, "
+            "uses $SPECNET_DATA_ROOT/processed/<profile>/profile.json."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=7, help="Base random seed used when train/eval seeds are not set.")
     parser.add_argument(
         "--train-seed",
@@ -2392,6 +2605,24 @@ def main() -> None:
     multi_weight = len(quality_weights) > 1 or bool(args.quality_weights)
     multi_train_seed = len(train_seeds) > 1 or bool(args.train_seeds)
     multi_controller_variant = len(controller_variants) > 1
+    trace_profile_path: Optional[str] = None
+    if args.workload_profile in TRACE_WORKLOAD_PROFILES:
+        resolver = {
+            "trace_driven_v1": resolve_v1_profile_path,
+            "trace_driven_v1_1": resolve_v1_profile_path,
+            "trace_driven_v2": resolve_v2_profile_path,
+            "trace_driven_v3_candidate": resolve_v3_profile_path,
+        }[args.workload_profile]
+        try:
+            trace_profile_path = str(
+                resolver(args.trace_profile_path or None)
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        if not os.path.isfile(trace_profile_path):
+            raise SystemExit(
+                f"Trace workload profile not found: {trace_profile_path}"
+            )
     invalid_loads = [load for load in loads if load not in LOAD_CONFIG]
     if invalid_loads:
         raise SystemExit(f"Invalid loads: {invalid_loads}")
@@ -2462,6 +2693,8 @@ def main() -> None:
                     lambda_initial=args.lambda_initial,
                     lambda_learning_rate=args.lambda_learning_rate,
                     lambda_max=args.lambda_max,
+                    workload_profile=args.workload_profile,
+                    trace_profile_path=trace_profile_path,
                 )
                 state_features = ",".join(CONTROLLER_VARIANT_FEATURES[controller_variant])
                 training_info = {
@@ -2475,6 +2708,8 @@ def main() -> None:
                     "quality_target": args.quality_target,
                     "quality_hard_floor": args.quality_hard_floor,
                     "safety_guard": args.safety_guard,
+                    "workload_profile": args.workload_profile,
+                    "trace_profile_path": trace_profile_path or "",
                     "lambda_initial": args.lambda_initial,
                     "lambda_learning_rate": args.lambda_learning_rate,
                     "lambda_max": args.lambda_max,
@@ -2524,6 +2759,7 @@ def main() -> None:
                             "network_model": args.network_model,
                             "action_coupling": args.action_coupling,
                             "safety_guard": args.safety_guard,
+                            "workload_profile": args.workload_profile,
                             "quality_target": args.quality_target,
                             "episode": update["episode"],
                             "updated": update["updated"],
@@ -2557,7 +2793,15 @@ def main() -> None:
     for load in loads:
         for run_index in range(args.eval_runs):
             workload_seed = eval_seed + 20000 + 1000 * run_index + 17 * list(LOAD_CONFIG).index(load)
-            specs = generate_workload(workload_seed, load, args.duration, args.max_workflows)
+            specs = generate_workload(
+                workload_seed,
+                load,
+                args.duration,
+                args.max_workflows,
+                workload_profile=args.workload_profile,
+                phase="test",
+                trace_profile_path=trace_profile_path,
+            )
             for policy_name in policies:
                 if policy_name in trained_policies:
                     # Reuse learned Q values but reset per-run counters.
@@ -2598,6 +2842,7 @@ def main() -> None:
                 summary["quality_target"] = args.quality_target
                 summary["quality_hard_floor"] = args.quality_hard_floor
                 summary["safety_guard"] = args.safety_guard
+                summary["workload_profile"] = args.workload_profile
                 summary["train_seed"] = train_seed
                 summary["eval_seed"] = eval_seed
                 summary["run"] = run_index
@@ -2630,6 +2875,7 @@ def main() -> None:
                             "quality_target": args.quality_target,
                             "quality_hard_floor": args.quality_hard_floor,
                             "safety_guard": args.safety_guard,
+                            "workload_profile": args.workload_profile,
                             "train_seed": train_seed,
                             "eval_seed": eval_seed,
                             "run": run_index,
@@ -2651,6 +2897,7 @@ def main() -> None:
                             "quality_target": args.quality_target,
                             "quality_hard_floor": args.quality_hard_floor,
                             "safety_guard": args.safety_guard,
+                            "workload_profile": args.workload_profile,
                             "train_seed": train_seed,
                             "eval_seed": eval_seed,
                             "run": run_index,
@@ -2672,6 +2919,7 @@ def main() -> None:
                             "quality_target": args.quality_target,
                             "quality_hard_floor": args.quality_hard_floor,
                             "safety_guard": args.safety_guard,
+                            "workload_profile": args.workload_profile,
                             "train_seed": train_seed,
                             "eval_seed": eval_seed,
                             "run": run_index,
@@ -2730,6 +2978,15 @@ def main() -> None:
         {
             "network_model": args.network_model,
             "action_coupling": args.action_coupling,
+            "workload": {
+                "profile": args.workload_profile,
+                "trace_profile_path": trace_profile_path,
+                "phase_split": {
+                    "training": "train",
+                    "checkpoint_validation": "validation",
+                    "evaluation": "test",
+                },
+            },
             "quality_constraints": {
                 "quality_target": args.quality_target,
                 "quality_hard_floor": args.quality_hard_floor,

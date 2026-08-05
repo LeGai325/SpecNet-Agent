@@ -1,0 +1,82 @@
+schema_version: 1
+dataset_id: ragpulse
+retrieved_at: "2026-08-01"
+official_url: "https://github.com/flashserve/RAGPulse"
+repository: "https://github.com/flashserve/RAGPulse.git"
+revision: "3672232d45d749fdcf45dbc38cc77e5264af4a32"
+license:
+  repository: MIT
+  license_sha256: "76d9798f1a0c8b8f16c73069717732ba1735c5eecd3c9b49beb6e192fb156e87"
+access: public_ungated
+stage1_preflight_completed: true
+phase2_use_approved: true
+phase2_scope: limited_rag_request_and_load_supplement
+
+local_snapshot:
+  relative_path: "downloads/ragpulse/3672232d/repo"
+  disk_usage_bytes: 10211328
+  git_commit_verified: true
+
+files:
+  - filename: data/0_trace.jsonl
+    bytes: 1923473
+    sha256: "cd371571bef3320907147f8901729e37f412aafb067ec8eb153e2828e1801e65"
+    parsed_rows: 7106
+  - filename: data/1_sys_prompt.jsonl
+    bytes: 315609
+    sha256: "e7bf9bc66493629fa279d67ffb9d6a44e4ec3a7ac60549f5c679319c54564f6d"
+    parsed_rows: 6898
+  - filename: data/2_passages.jsonl
+    bytes: 347002
+    sha256: "8575941cab2eb1cae25e589b7fab3ccb6affc3809e4156b1dc6db40d9e65b891"
+    parsed_rows: 8302
+  - filename: data/3_history.jsonl
+    bytes: 210541
+    sha256: "fdd9b1ca962c2b4d0f48785497007e20aa961442eb93cb1afbe3f23c383ae467"
+    parsed_rows: 4910
+  - filename: data/4_user_input.jsonl
+    bytes: 278133
+    sha256: "5adeff33a44850f5a1c0892aaaf7000114d7ac24821d4238175abb92b77dd12d"
+    parsed_rows: 6292
+  - filename: data/5_web_search.jsonl
+    bytes: 23972
+    sha256: "5e4cba4e2e449eb1a26c1c94aa57a59204f29c8ed0395da03cf0f43b7d75891c"
+    parsed_rows: 522
+
+decision:
+  status: limited_accept
+  role: rag_request_composition_session_arrival_tokens
+  not_for:
+    - agent_tool_sequence
+    - task_outcome
+    - component_runtime
+    - real_deadline
+    - network_telemetry
+
+data_quality_notes:
+  - "7106 条主记录全部可解析，无缺失关键字段、重复记录或悬空组件引用。"
+  - "timestamp 有一次从 604453 回到 0，形成 3800 与 3306 条两个逻辑时间窗口。"
+  - "进入任何 arrival/gap 分析前必须按回绕点切段，不得直接整体排序。"
+  - "数据只含重映射 ID、token 长度和伪匿名 session，无原始文本。"
+
+stage2_processed:
+  record_count: 7106
+  session_count: 3990
+  output_relative_path: "processed/unified_trace_v2/ragpulse_requests.jsonl"
+  output_sha256: "a3d0759c1d00729196b8cb2c1bc307c98762cec72e35fd6a2cf7feb1709b6c62"
+  split_records: {train: 5015, validation: 1022, test: 1069}
+  session_split_overlap: 0
+  fit_strength: medium
+  rejected_as:
+    - complete_agent_workflow_trace
+    - tool_or_step_runtime_calibration
+    - dynamic_dag_source
+    - outcome_or_quality_source
+
+stage3_profile:
+  profile_relative_path: "processed/trace_driven_v2/profile.json"
+  profile_sha256: "4dbe8541f9ac8e6b901c165273e18cf169fe02f043d936b3125e622e272ceec2"
+  trace_source_weight: 0.25
+  effective_total_train_trace_share: 0.15
+  temporal_arrival_enabled: false
+  temporal_arrival_reason: only_two_ambiguous_windows_cannot_form_three_independent_splits
