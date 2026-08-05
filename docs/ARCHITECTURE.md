@@ -52,8 +52,22 @@ speculation level 及 created/ready/started/completed/failed/retried/cancelled/s
 
 当前 adapter 将固定 `Planner -> Branches -> LLM -> Judge` 结构转换为 hints，且明确
 标记 `fixed_template_adapter`。Collector API 可以记录运行中新增和剪枝事件，但动态
-DAG 的创建、解锁、失败重试和 Judge 剪枝仍应由后续独立 runtime 执行器负责。详细契约
-见 `docs/WORKFLOW_HINT_COLLECTOR.md`。
+DAG 的创建、解锁、失败重试和 Judge 剪枝由独立 `dynamic_dag.py` runtime 执行器负责。
+当前执行器已经通过四类确定性 fixture 和现有网络 Flow 调度器的三档容量 preflight，
+但默认实验仍保留固定 workflow。Collector 详细契约见 `docs/WORKFLOW_HINT_COLLECTOR.md`，
+执行器说明见 `docs/DYNAMIC_DAG.md`。
+
+### Dynamic DAG Runtime
+
+`DynamicDAGEngine` 维护 `StepSpec`、`StepRuntime`、parent/child 索引、ready queue、
+attempt 和 graph version。hard parents 完成后自动解锁 child；optional evidence 与
+control trigger 只记录语义，不阻塞执行。`DynamicDAGFlowBridge` 将 ready step 映射到
+外部 Flow，并把 Flow 完成、失败或取消反向同步到 DAG。
+
+Planner/Judge policy 与 DAG Engine 解耦。当前 RAG supplemental、Coding retry、Judge
+pruning 和 Parallel join 都是确定性功能 fixture，不读取 prompt 或响应内容，也不作为
+真实 Agent benchmark。默认固定状态机没有被替换，避免在缺少真实动态图数据时改变历史
+实验语义。
 
 ## Policy 和 Controller
 
@@ -208,5 +222,7 @@ quality 最高的动作并记录 `quality_constraint_infeasible`。实际完成�
 - `test_training_stability.py`：训练 schedule、checkpoint 和 validation 配置。
 - `test_slack_calibration.py`：离线 calibration 分组和 role-aware 估算。
 - `test_multi_path.py`：路径映射、容量隔离、调度权重、默认兼容性和输出契约。
+- `test_dynamic_dag.py`：在线增长、依赖解锁、Flow bridge、retry、剪枝、四类 fixture 和
+  三档容量 preflight。
 
 新增模块至少应包含一个针对新行为的测试，以及一个确认旧默认行为不变的回归测试。
