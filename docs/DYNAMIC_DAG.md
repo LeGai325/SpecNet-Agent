@@ -45,7 +45,7 @@ reward、Controller、Slack、ACTION_CONFIG、scheduler 和输出保持不变。
 - `FlowCancellation`：DAG 剪枝后返回给网络运行时的 flow 取消请求。
 
 当前通过 `speculation_level == 0` 表示不可由 Judge 普通剪枝的必要步骤；大于 0 的步骤可
-作为 optional/speculative 子图。这个约定与 Collector v1 保持一致。
+作为 optional/speculative 子图。这个约定与 Collector v1.1 保持一致。
 
 ## 生命周期与依赖
 
@@ -126,7 +126,7 @@ python3 specnet_agent_experiments/dynamic_dag_fixtures.py
 
 ```bash
 python3 specnet_agent_experiments/dynamic_dag_preflight.py \
-  --output-dir outputs/dynamic_dag_preflight_v1
+  --output-dir outputs/dynamic_dag_preflight_v1_1
 ```
 
 输出：
@@ -169,25 +169,17 @@ python3 -m unittest discover -s specnet_agent_experiments -p 'test_*.py'
 测试覆盖 dependency unlock、join、Flow 双向同步、失败重试、retry limit、Judge 采用、
 剪枝保护、snapshot、finalize、四类 fixture 和三档容量 preflight。
 
-## Collector v1.1 反馈清单
+## Collector v1.1 回放结果
 
-动态 preflight 共产生 285 条 Collector 事件。现有 v1 schema 可以完整记录动态新增、
-ready/start/complete、失败重试、取消和 Judge 采用，12 个 workflow 均能成功 finalize，说明
-核心生命周期和三类依赖暂时不需要推翻。
+动态 preflight 共产生 285 条 Collector 事件。v1.0 replay 审计的 12 个 workflow 均能
+重建，和 Engine snapshot 公共字段为 0 mismatch；但 12 个 failure/retry/cancel 事件都没有
+原因。Collector v1.1 因此只增加结构化 `reason`，并提供兼容 v1.0/v1.1 的 active DAG
+replay 和 diagnostics。
 
-真实运行也暴露了几项后续可改进点：
-
-1. `cancelled` 事件没有 prune、timeout 或 policy cancellation 的原因。
-2. Collector 事件没有 `graph_version`，消费者不能直接把事件对应到 active graph 版本。
-3. retry 复用 step-level `size_hint`；未来如果每次 attempt 工作量不同，需要 attempt-level
-   size/status。
-4. workflow finalize 只体现在 summary 状态中，没有独立 workflow-level final event。
-5. 当前只能从全量事件重建 active DAG；高密度 workload 可能需要可选 snapshot 或 version
-   delta。
-
-这些字段不阻碍动态 DAG v1 正确执行，因此不在同一功能改动中直接升级 schema。建议在
-Collector v1.1 独立改动中加入版本号和向后兼容测试，并根据 `Pcrit/Score` 的真实输入需求
-决定最小字段集合。
+v1.1 重跑仍为 0 validation error、0 replay error、0 snapshot mismatch，12 个 reasoned
+event 全部有原因。JSONL 从 131,024 增至 135,179 bytes，增加约 3.2%。审计也确认当前
+`sequence` 已足够重建 active DAG，因此没有把 `graph_version` 或完整 snapshot 复制到每条
+事件；attempt-level size 和 workflow final event 继续等待真实消费者需求。
 
 ## 当前限制与下一步
 
@@ -197,5 +189,4 @@ Collector v1.1 独立改动中加入版本号和向后兼容测试，并根据 `
 - fixture rule 不是语义 Planner/Judge，不能用于宣称真实 Agent Runtime 收益。
 - 当前不计算 `Pcrit/Score(f)`，也不改变 QoS queue、Guard 或 Controller action。
 
-下一步先根据真实动态事件做 Collector v1.1 反馈检查，确认 retry attempt、graph version、
-prune reason、snapshot 和输出体积是否满足后续消费者，再实现 shadow-mode `Pcrit/Score`。
+下一步是在 Collector v1.1 的 active DAG replay 上实现 shadow-mode `Pcrit/Score`。

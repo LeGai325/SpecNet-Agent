@@ -116,6 +116,10 @@ class WorkflowHintCollectorTest(unittest.TestCase):
         self.assertEqual(collector.summary()["validation_errors"], 0)
         self.assertEqual(collector.summary()["workflow_statuses"], {"completed": 1})
         self.assertEqual(
+            collector.summary()["event_reasons"],
+            {"execution_failed": 1, "retry_requested": 1},
+        )
+        self.assertEqual(
             [event.event for event in collector.events if event.step_id == "retrieval:0"],
             ["created", "ready", "started", "failed", "retried", "ready", "started", "completed"],
         )
@@ -196,6 +200,7 @@ class WorkflowHintCollectorTest(unittest.TestCase):
                 "size_unit",
                 "speculation_level",
                 "event",
+                "reason",
                 "timestamp",
                 "source",
             },
@@ -203,6 +208,39 @@ class WorkflowHintCollectorTest(unittest.TestCase):
         serialized = json.dumps(event).lower()
         for forbidden in ("prompt", "content", "payload", "response_text", "tool_args"):
             self.assertNotIn(forbidden, serialized)
+
+    def test_reasoned_events_use_valid_structured_reasons(self) -> None:
+        collector = self.make_collector()
+        self.create_running_step(collector, "tool")
+        collector.fail_step(
+            7,
+            "tool",
+            timestamp=1.0,
+            reason="execution_failed",
+        )
+        collector.retry_step(
+            7,
+            "tool",
+            timestamp=2.0,
+            reason="retry_requested",
+        )
+        collector.mark_ready(7, "tool", timestamp=2.0)
+        collector.cancel_step(
+            7,
+            "tool",
+            timestamp=3.0,
+            reason="judge_pruned",
+        )
+
+        reasons = [event.reason for event in collector.events if event.reason]
+        self.assertEqual(
+            reasons,
+            ["execution_failed", "retry_requested", "judge_pruned"],
+        )
+        with self.assertRaisesRegex(WorkflowHintError, "invalid event reason"):
+            other = self.make_collector()
+            self.create_running_step(other, "other")
+            other.cancel_step(7, "other", timestamp=1.0, reason="free_form_text")
 
 
 class WorkflowHintSimulatorTest(unittest.TestCase):
@@ -325,6 +363,13 @@ class WorkflowHintSimulatorTest(unittest.TestCase):
 
         self.assertEqual(summary["workflow_hint_summary"]["workflow_statuses"], {"timed_out": 1})
         self.assertEqual(simulator.workflow_hint_collector.step(0, "planner").state, "cancelled")
+        cancelled = [
+            event
+            for event in simulator.workflow_hint_collector.events
+            if event.event == "cancelled"
+        ]
+        self.assertTrue(cancelled)
+        self.assertTrue(all(event.reason == "workflow_timeout" for event in cancelled))
         simulator.workflow_hint_collector.validate_all(require_terminal=True)
 
     def test_cli_record_mode_writes_jsonl_and_summary(self) -> None:

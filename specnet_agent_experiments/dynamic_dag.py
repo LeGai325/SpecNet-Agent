@@ -15,9 +15,9 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 try:
-    from workflow_hints import DEPENDENCY_KINDS, WorkflowHintCollector
+    from workflow_hints import DEPENDENCY_KINDS, EVENT_REASONS, WorkflowHintCollector
 except ImportError:  # pragma: no cover - package-style imports
-    from .workflow_hints import DEPENDENCY_KINDS, WorkflowHintCollector
+    from .workflow_hints import DEPENDENCY_KINDS, EVENT_REASONS, WorkflowHintCollector
 
 
 ACTIVE_STEP_STATES = {"created", "ready", "running"}
@@ -307,27 +307,41 @@ class DynamicDAGEngine:
         *,
         timestamp: float,
         flow_id: Optional[object] = None,
+        reason: str = "execution_failed",
     ) -> None:
         graph, step = self._step(workflow_id, step_id)
         self._require_active(graph)
         self._require_state(step, {"running"}, "fail")
         self._verify_flow(step, flow_id)
         event_time = self._timestamp(graph, timestamp)
+        reason_name = self._event_reason(reason)
 
         if self.collector is not None:
-            self.collector.fail_step(graph.workflow_id, step.step_id, timestamp=event_time)
+            self.collector.fail_step(
+                graph.workflow_id,
+                step.step_id,
+                timestamp=event_time,
+                reason=reason_name,
+            )
         step.state = "failed"
         step.completed_at = event_time
         step.failure_count += 1
         self._mutated(graph, event_time)
 
-    def fail_flow(self, flow_id: object, *, timestamp: float) -> None:
+    def fail_flow(
+        self,
+        flow_id: object,
+        *,
+        timestamp: float,
+        reason: str = "execution_failed",
+    ) -> None:
         binding = self._binding(flow_id)
         self.fail_step(
             binding.workflow_id,
             binding.step_id,
             timestamp=timestamp,
             flow_id=binding.flow_id,
+            reason=reason,
         )
 
     def retry_step(
@@ -336,6 +350,7 @@ class DynamicDAGEngine:
         step_id: object,
         *,
         timestamp: float,
+        reason: str = "retry_requested",
     ) -> StepRuntime:
         graph, step = self._step(workflow_id, step_id)
         self._require_active(graph)
@@ -345,9 +360,15 @@ class DynamicDAGEngine:
                 f"retry limit exhausted for {graph.workflow_id}/{step.step_id}"
             )
         event_time = self._timestamp(graph, timestamp)
+        reason_name = self._event_reason(reason)
 
         if self.collector is not None:
-            self.collector.retry_step(graph.workflow_id, step.step_id, timestamp=event_time)
+            self.collector.retry_step(
+                graph.workflow_id,
+                step.step_id,
+                timestamp=event_time,
+                reason=reason_name,
+            )
         step.attempt_id += 1
         step.state = "created"
         step.flow_id = None
@@ -367,17 +388,22 @@ class DynamicDAGEngine:
         step_id: object,
         *,
         timestamp: float,
-        reason: str = "cancelled",
+        reason: str = "policy_cancelled",
     ) -> Optional[FlowCancellation]:
         graph, step = self._step(workflow_id, step_id)
         self._require_active(graph)
         self._require_state(step, ACTIVE_STEP_STATES, "cancel")
         event_time = self._timestamp(graph, timestamp)
-        reason_name = _token(reason, "cancel_reason")
+        reason_name = self._event_reason(reason)
         previous_state = step.state
 
         if self.collector is not None:
-            self.collector.cancel_step(graph.workflow_id, step.step_id, timestamp=event_time)
+            self.collector.cancel_step(
+                graph.workflow_id,
+                step.step_id,
+                timestamp=event_time,
+                reason=reason_name,
+            )
         step.state = "cancelled"
         step.completed_at = event_time
         step.cancel_reason = reason_name
@@ -399,7 +425,7 @@ class DynamicDAGEngine:
         flow_id: object,
         *,
         timestamp: float,
-        reason: str = "cancelled",
+        reason: str = "policy_cancelled",
     ) -> Optional[FlowCancellation]:
         binding = self._binding(flow_id)
         return self.cancel_step(
@@ -711,6 +737,13 @@ class DynamicDAGEngine:
             raise DynamicDAGError(f"flow is not bound: {flow_key}") from exc
 
     @staticmethod
+    def _event_reason(reason: object) -> str:
+        reason_name = str(reason)
+        if reason_name not in EVENT_REASONS:
+            raise DynamicDAGError(f"invalid event reason: {reason!r}")
+        return reason_name
+
+    @staticmethod
     def _require_state(step: StepRuntime, allowed: Set[str], action: str) -> None:
         if step.state not in allowed:
             raise DynamicDAGError(
@@ -825,8 +858,9 @@ class DynamicDAGFlowBridge:
         flow_id: object,
         *,
         timestamp: float,
+        reason: str = "execution_failed",
     ) -> None:
-        self.engine.fail_flow(flow_id, timestamp=timestamp)
+        self.engine.fail_flow(flow_id, timestamp=timestamp, reason=reason)
 
     def retry_step(
         self,
@@ -834,8 +868,14 @@ class DynamicDAGFlowBridge:
         step_id: object,
         *,
         timestamp: float,
+        reason: str = "retry_requested",
     ) -> Tuple[FlowBinding, ...]:
-        self.engine.retry_step(workflow_id, step_id, timestamp=timestamp)
+        self.engine.retry_step(
+            workflow_id,
+            step_id,
+            timestamp=timestamp,
+            reason=reason,
+        )
         return self.dispatch_ready(workflow_id, timestamp=timestamp)
 
     def prune_subgraph(

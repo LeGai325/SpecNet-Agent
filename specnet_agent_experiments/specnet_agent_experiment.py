@@ -1119,7 +1119,13 @@ class Simulator:
             timestamp=timestamp,
         )
 
-    def cancel_flow_hint(self, flow: Flow, *, timestamp: Optional[float] = None) -> None:
+    def cancel_flow_hint(
+        self,
+        flow: Flow,
+        *,
+        timestamp: Optional[float] = None,
+        reason: str = "policy_cancelled",
+    ) -> None:
         if self.workflow_hint_collector is None or flow.flow_id not in self.flow_hint_steps:
             return
         step_id = self.flow_hint_steps[flow.flow_id]
@@ -1131,6 +1137,7 @@ class Simulator:
             flow.workflow_id,
             step_id,
             timestamp=event_time,
+            reason=reason,
         )
 
     def select_flow_hint(self, flow: Flow) -> None:
@@ -1150,6 +1157,7 @@ class Simulator:
         workflow: WorkflowRuntime,
         *,
         timestamp: float,
+        reason: str = "workflow_timeout",
     ) -> None:
         if self.workflow_hint_collector is None:
             return
@@ -1159,7 +1167,7 @@ class Simulator:
                 continue
             step = self.workflow_hint_collector.step(flow.workflow_id, step_id)
             if step.state not in {"completed", "failed", "cancelled"}:
-                self.cancel_flow_hint(flow, timestamp=timestamp)
+                self.cancel_flow_hint(flow, timestamp=timestamp, reason=reason)
 
     def finalize_workflow_hints(
         self,
@@ -1621,7 +1629,7 @@ class Simulator:
             workflow.background_bytes_served += flow.served
             if flow.completed_at is None:
                 flow.cancelled = True
-                self.cancel_flow_hint(flow)
+                self.cancel_flow_hint(flow, reason="workflow_completed")
         self.finalize_workflow_hints(
             workflow,
             status="completed",
@@ -1668,7 +1676,7 @@ class Simulator:
                 workflow.unused_speculative_bytes += flow.served
             if flow.completed_at is None:
                 flow.cancelled = True
-                self.cancel_flow_hint(flow)
+                self.cancel_flow_hint(flow, reason="judge_pruned")
 
         if workflow.total_optional_utility <= 1e-12:
             workflow.quality = 1.0
@@ -1837,10 +1845,15 @@ class Simulator:
                     workflow.background_bytes_served += flow.served
                     if flow.completed_at is None:
                         flow.cancelled = True
-                        self.cancel_flow_hint(flow, timestamp=self.max_time)
+                        self.cancel_flow_hint(
+                            flow,
+                            timestamp=self.max_time,
+                            reason="workflow_timeout",
+                        )
                 self.cancel_open_workflow_hints(
                     workflow,
                     timestamp=self.max_time,
+                    reason="workflow_timeout",
                 )
                 self.finalize_workflow_hints(
                     workflow,
@@ -2672,6 +2685,7 @@ def aggregate_workflow_hint_runs(
     )
     mapping_fields = (
         "events_by_type",
+        "event_reasons",
         "request_types",
         "dependency_kinds",
         "speculation_levels",

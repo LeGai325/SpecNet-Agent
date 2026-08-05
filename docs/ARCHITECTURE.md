@@ -45,10 +45,11 @@ TraceLab 与 SWE-chat。SWE-chat 先按 content hash 去重，再按 repo-user �
 ### Workflow Hint Collector
 
 可选 `--workflow-hints record` 在 evaluation 中以 shadow mode 记录 workflow DAG
-元数据。Collector 位于 `specnet_agent_experiments/workflow_hints.py`，记录
+元数据。Collector 位于 `specnet_agent_experiments/workflow_hints.py`，v1.1 记录
 `workflow_id`、`step_id`、parents、依赖类型、request type、deadline、size、
 speculation level 及 created/ready/started/completed/failed/retried/cancelled/selected
-事件。默认 `off` 不实例化 Collector，也不改变历史输出。
+事件，并为 failed/retried/cancelled 提供结构化 reason。默认 `off` 不实例化 Collector，
+也不改变历史输出。`workflow_hint_replay.py` 兼容读取 v1.0/v1.1，并重建 active DAG。
 
 当前 adapter 将固定 `Planner -> Branches -> LLM -> Judge` 结构转换为 hints，且明确
 标记 `fixed_template_adapter`。Collector API 可以记录运行中新增和剪枝事件，但动态
@@ -224,5 +225,7 @@ quality 最高的动作并记录 `quality_constraint_infeasible`。实际完成�
 - `test_multi_path.py`：路径映射、容量隔离、调度权重、默认兼容性和输出契约。
 - `test_dynamic_dag.py`：在线增长、依赖解锁、Flow bridge、retry、剪枝、四类 fixture 和
   三档容量 preflight。
+- `test_workflow_hint_replay.py`：v1.0 兼容读取、active DAG 回放、reason、diagnostics 和
+  Engine snapshot 对照。
 
 新增模块至少应包含一个针对新行为的测试，以及一个确认旧默认行为不变的回归测试。

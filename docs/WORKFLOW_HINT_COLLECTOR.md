@@ -56,7 +56,7 @@ python3 specnet_agent_experiments/specnet_agent_experiment.py \
 
 ## 数据契约
 
-当前 schema version 为 `1.0`。每条 JSONL 事件包含：
+当前 schema version 为 `1.1`。每条 JSONL 事件包含：
 
 | 字段 | 含义 |
 |---|---|
@@ -71,6 +71,7 @@ python3 specnet_agent_experiments/specnet_agent_experiment.py \
 | `size_unit` | 当前模拟器使用 `normalized_work` |
 | `speculation_level` | `[0, 1]`，0 表示必要，1 表示完全可选 |
 | `event` | 步骤生命周期事件 |
+| `reason` | failed/retried/cancelled 的结构化原因；其他事件为空字符串 |
 | `timestamp` | Collector 时钟域中的事件时间 |
 | `source` | 数据来源或 adapter |
 
@@ -87,6 +88,17 @@ created -> ready -> running -> completed
 ```
 
 `selected` 是独立事件：表示一个已经完成的 optional step 最终被 Judge 采用，不替代步骤执行状态。
+
+v1.1 为以下事件提供固定 reason 枚举：
+
+- `execution_failed`
+- `retry_requested`
+- `judge_pruned`
+- `workflow_timeout`
+- `workflow_completed`
+- `policy_cancelled`
+
+reason 只解释已经发生的生命周期事件，不允许携带自由文本或内容数据。
 
 依赖分为三类：
 
@@ -129,9 +141,38 @@ workflow_hint_summary.json
 
 `workflow_hints.jsonl` 每行是一条 hint event，同时包含 load、policy、训练 seed、评估 seed、run 和 workload seed 上下文。默认只包含目标 SpecNet 策略；`--workflow-hint-policies all` 可扩展到所有 baseline。
 
-`workflow_hint_summary.json` 包含逐 run 和聚合统计：workflow/step/event 数量、事件类型、request type、依赖类型、推测等级、selected 数量、workflow 最终状态、来源和校验错误数。
+`workflow_hint_summary.json` 包含逐 run 和聚合统计：workflow/step/event 数量、事件类型、
+reason、request type、依赖类型、推测等级、selected 数量、workflow 最终状态、来源和校验
+错误数。
 
 `specnet_agent_model.json` 仅在 `record` 模式下增加 schema 和 `affects_policy=false` 说明。默认 `off` 不改变旧 model metadata。
+
+## v1.0 兼容与 Active DAG Replay
+
+`workflow_hint_replay.py` 可以读取 v1.0 和 v1.1 事件。v1.0 缺少 reason 时按空字符串读取，
+其余字段含义不变。replay 可以在任意 sequence 或 timestamp 重建：
+
+- active、ready、running 和 terminal steps
+- parents、children 和依赖类型
+- 当前 attempt 和失败次数
+- Judge selected 状态
+- 最后一个结构化 reason
+
+回放器会产生带 `code/message/sequence/step_id` 的 diagnostics，包括非法状态转换、悬空
+依赖、时间倒退、attempt 不一致、DAG 环和 replay/snapshot mismatch。它同样拒绝
+prompt、payload、tool args 等内容字段。
+
+审计动态 preflight：
+
+```bash
+python3 specnet_agent_experiments/workflow_hint_replay.py \
+  --events outputs/dynamic_dag_preflight_v1_1/dynamic_dag_preflight_events.jsonl \
+  --snapshots outputs/dynamic_dag_preflight_v1_1/dynamic_dag_preflight_snapshots.json \
+  --output outputs/dynamic_dag_preflight_v1_1/workflow_hint_v1_1_replay_audit.json
+```
+
+不在每个事件中复制完整 graph snapshot。审计确认 `sequence` 足以重建 step-level active
+DAG，因此 v1.1 暂不增加逐事件 `graph_version`。
 
 ## 校验与测试
 
@@ -145,23 +186,30 @@ Collector 会拒绝：
 - 非法生命周期转换
 - hard parent 未完成时进入 ready
 - workflow finalize 时仍存在非终止步骤
+- 非法或自由文本 event reason
+- v1.1 reasoned event 缺少 reason
+- replay 中的非法转换、attempt 漂移和 snapshot mismatch
 
 测试文件：
 
 ```text
 specnet_agent_experiments/test_workflow_hints.py
+specnet_agent_experiments/test_workflow_hint_replay.py
 ```
 
-测试覆盖动态新增步骤、hard/optional/control 依赖、失败重试、Judge 采用、剪枝取消、超时、隐私字段、固定模板映射、CLI 输出和 Collector on/off 等价回归。
+测试覆盖动态新增步骤、hard/optional/control 依赖、失败重试、Judge 采用、剪枝取消、超时、
+reason、v1.0 兼容读取、active DAG replay、隐私字段、固定模板映射、CLI 输出和 Collector
+on/off 等价回归。
 
 ## 当前限制与下一步
 
-Collector 的 schema、生命周期和校验接口可以继续用于正式版本，但当前输入仍来自固定模板 adapter。它尚不负责：
+Collector v1.1 已与动态 DAG 执行器和固定模板 adapter 同时集成，但它尚不负责：
 
-- 执行动态 DAG
 - 决定 Planner 何时增加步骤
 - 决定 Judge 何时剪枝
 - 计算 `Pcrit` 或 `Score(f)`
 - 影响 Traffic Classifier、Guard 或 QoS
 
-下一步应实现独立动态 DAG 执行器，并让它通过当前 Collector API 发出在线新增、依赖解锁、失败重试和剪枝事件。第一轮先使用手工 RAG、Coding、Retry 和 pruning fixtures 验证；只有外部日志明确包含 parents 或动态事件时，才映射成真实 trace-driven DAG。
+当前 v1.1 preflight 的 12 个组合均为 0 validation error、0 replay error 和 0 snapshot
+mismatch。下一步应在稳定的 v1.1 active DAG 上实现 shadow-mode `Pcrit/Score`；只有外部
+日志明确包含 parents 或动态事件时，才映射成真实 trace-driven DAG。

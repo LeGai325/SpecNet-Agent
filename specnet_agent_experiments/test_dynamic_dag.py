@@ -241,6 +241,13 @@ class DynamicDAGFixtureTest(unittest.TestCase):
         self.assertIn(("failed", 0), tool_events)
         self.assertIn(("retried", 1), tool_events)
         self.assertIn(("completed", 1), tool_events)
+        reason_by_event = {
+            event["event"]: event["reason"]
+            for event in self.results["coding_retry"].events
+            if event["step_id"] == "tool" and event["reason"]
+        }
+        self.assertEqual(reason_by_event["failed"], "execution_failed")
+        self.assertEqual(reason_by_event["retried"], "retry_requested")
 
     def test_judge_fixture_selects_one_and_cancels_two(self):
         result = self.results["judge_pruning"]
@@ -248,6 +255,12 @@ class DynamicDAGFixtureTest(unittest.TestCase):
         self.assertTrue(result.snapshot["steps"]["branch:a"]["selected_by_judge"])
         self.assertEqual(result.snapshot["steps"]["branch:b"]["state"], "cancelled")
         self.assertEqual(result.snapshot["steps"]["branch:c"]["state"], "cancelled")
+        cancelled_reasons = {
+            event["reason"]
+            for event in result.events
+            if event["event"] == "cancelled"
+        }
+        self.assertEqual(cancelled_reasons, {"judge_pruned"})
 
     def test_parallel_join_becomes_ready_after_all_parents_complete(self):
         events = self.results["parallel_join"].events
@@ -371,8 +384,24 @@ class DynamicDAGSimulatorFlowTest(unittest.TestCase):
         for result in by_fixture["coding_retry"]:
             self.assertEqual(result.logical_failures, 1)
             self.assertEqual(result.retries, 1)
+            self.assertEqual(
+                {
+                    event["reason"]
+                    for event in result.events
+                    if event["event"] in {"failed", "retried"}
+                },
+                {"execution_failed", "retry_requested"},
+            )
         for result in by_fixture["judge_pruning"]:
             self.assertEqual(result.cancelled_flows, 2)
+            self.assertEqual(
+                {
+                    event["reason"]
+                    for event in result.events
+                    if event["event"] == "cancelled"
+                },
+                {"judge_pruned"},
+            )
 
 
 if __name__ == "__main__":

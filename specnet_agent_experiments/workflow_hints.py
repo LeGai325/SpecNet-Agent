@@ -14,7 +14,8 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
+SUPPORTED_SCHEMA_VERSIONS = {"1.0", SCHEMA_VERSION}
 
 DEPENDENCY_KINDS = {
     "hard_dependency",
@@ -32,6 +33,16 @@ STEP_EVENTS = {
     "cancelled",
     "selected",
 }
+
+EVENT_REASONS = {
+    "execution_failed",
+    "judge_pruned",
+    "policy_cancelled",
+    "retry_requested",
+    "workflow_completed",
+    "workflow_timeout",
+}
+REASONED_STEP_EVENTS = {"failed", "retried", "cancelled"}
 
 TERMINAL_STEP_STATES = {"completed", "failed", "cancelled"}
 WORKFLOW_FINAL_STATES = {"completed", "timed_out", "failed", "cancelled"}
@@ -103,6 +114,7 @@ class WorkflowHintEvent:
     size_unit: str
     speculation_level: float
     event: str
+    reason: str
     timestamp: float
     source: str
 
@@ -123,6 +135,7 @@ class WorkflowHintEvent:
             "size_unit": self.size_unit,
             "speculation_level": self.speculation_level,
             "event": self.event,
+            "reason": self.reason,
             "timestamp": self.timestamp,
             "source": self.source,
         }
@@ -284,26 +297,48 @@ class WorkflowHintCollector:
         self._require_state(step, {"running"}, "complete")
         self._transition(step, "completed", "completed", timestamp)
 
-    def fail_step(self, workflow_id: object, step_id: object, *, timestamp: float) -> None:
+    def fail_step(
+        self,
+        workflow_id: object,
+        step_id: object,
+        *,
+        timestamp: float,
+        reason: str = "execution_failed",
+    ) -> None:
         _, step = self._step(workflow_id, step_id)
         self._require_state(step, {"running"}, "fail")
-        self._transition(step, "failed", "failed", timestamp)
+        self._transition(step, "failed", "failed", timestamp, reason=reason)
 
-    def retry_step(self, workflow_id: object, step_id: object, *, timestamp: float) -> int:
+    def retry_step(
+        self,
+        workflow_id: object,
+        step_id: object,
+        *,
+        timestamp: float,
+        reason: str = "retry_requested",
+    ) -> int:
         _, step = self._step(workflow_id, step_id)
         self._require_state(step, {"failed"}, "retry")
         event_time = self._validate_step_timestamp(step, timestamp)
+        reason_name = self._validate_event_reason("retried", reason)
         step.attempt_id += 1
         step.state = "created"
         step.selected = False
         step.last_timestamp = event_time
-        self._emit(step, "retried", event_time)
+        self._emit(step, "retried", event_time, reason=reason_name)
         return step.attempt_id
 
-    def cancel_step(self, workflow_id: object, step_id: object, *, timestamp: float) -> None:
+    def cancel_step(
+        self,
+        workflow_id: object,
+        step_id: object,
+        *,
+        timestamp: float,
+        reason: str = "policy_cancelled",
+    ) -> None:
         _, step = self._step(workflow_id, step_id)
         self._require_state(step, {"created", "ready", "running"}, "cancel")
-        self._transition(step, "cancelled", "cancelled", timestamp)
+        self._transition(step, "cancelled", "cancelled", timestamp, reason=reason)
 
     def mark_selected(self, workflow_id: object, step_id: object, *, timestamp: float) -> None:
         _, step = self._step(workflow_id, step_id)
@@ -387,6 +422,9 @@ class WorkflowHintCollector:
             "steps_recorded": len(steps),
             "events_recorded": len(self._events),
             "events_by_type": dict(sorted(Counter(event.event for event in self._events).items())),
+            "event_reasons": dict(
+                sorted(Counter(event.reason for event in self._events if event.reason).items())
+            ),
             "request_types": dict(sorted(Counter(step.request_type for step in steps).items())),
             "dependency_kinds": dict(sorted(dependency_counts.items())),
             "speculation_levels": dict(sorted(speculation_counts.items())),
@@ -439,11 +477,14 @@ class WorkflowHintCollector:
         state: str,
         event: str,
         timestamp: float,
+        *,
+        reason: str = "",
     ) -> None:
         event_time = self._validate_step_timestamp(step, timestamp)
+        reason_name = self._validate_event_reason(event, reason)
         step.state = state
         step.last_timestamp = event_time
-        self._emit(step, event, event_time)
+        self._emit(step, event, event_time, reason=reason_name)
 
     @staticmethod
     def _validate_step_timestamp(step: StepHintRecord, timestamp: float) -> float:
@@ -455,9 +496,26 @@ class WorkflowHintCollector:
             )
         return event_time
 
-    def _emit(self, step: StepHintRecord, event: str, timestamp: float) -> None:
+    @staticmethod
+    def _validate_event_reason(event: str, reason: object) -> str:
+        reason_name = str(reason)
+        if reason_name and reason_name not in EVENT_REASONS:
+            raise WorkflowHintError(f"invalid event reason: {reason!r}")
+        if reason_name and event not in REASONED_STEP_EVENTS:
+            raise WorkflowHintError(f"event {event} does not accept a reason")
+        return reason_name
+
+    def _emit(
+        self,
+        step: StepHintRecord,
+        event: str,
+        timestamp: float,
+        *,
+        reason: str = "",
+    ) -> None:
         if event not in STEP_EVENTS:
             raise WorkflowHintError(f"invalid step event: {event}")
+        reason_name = self._validate_event_reason(event, reason)
         self._events.append(
             WorkflowHintEvent(
                 sequence=len(self._events),
@@ -472,6 +530,7 @@ class WorkflowHintCollector:
                 size_unit=step.size_unit,
                 speculation_level=step.speculation_level,
                 event=event,
+                reason=reason_name,
                 timestamp=timestamp,
                 source=step.source,
             )

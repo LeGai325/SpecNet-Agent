@@ -35,9 +35,9 @@
   入口 smoke；30-episode paired preflight 与 5-seed、90-episode、10-run 的 V2 vs V3
   正式配对实验均已通过，Trace Commons 仅作校验，VTCode 与 Exgentic 不进入真实 workload。
 - 渐进式 speculation admission、运行中追加与停止 branch 仍明确延期。
-- 新增默认关闭的 Workflow Hint Collector v1：记录内容无关的 step/DAG hints、
-  动态生命周期、三类依赖、失败重试和 Judge 采用事件；提供 JSONL/summary 输出、
-  DAG 校验、隐私字段边界和 on/off 等价回归。当前输入仍来自固定模板 adapter。
+- 新增默认关闭的 Workflow Hint Collector v1.1：记录内容无关的 step/DAG hints、
+  动态生命周期、三类依赖、失败重试、Judge 采用及结构化 event reason；提供 JSONL/summary、
+  v1.0 兼容 active DAG replay、结构化 diagnostics、隐私字段边界和 on/off 等价回归。
 - 新增独立动态 DAG 执行器 v1：支持在线 add-step、hard dependency 解锁、optional/control
   依赖、Flow 双向绑定、失败重试、Judge 采用、optional 子图安全剪枝和 active graph
   snapshot。RAG 补检索、Coding Retry、Judge Pruning、Parallel Join 四类确定性 fixture
@@ -84,8 +84,8 @@
 
 ## 下一步
 
-1. 使用动态 DAG 真实事件做 Collector v1.1 反馈检查，必要时补充 versioned schema。
-2. 在 Collector 输出上实现 shadow-mode `Pcrit/Score`。
+1. 在 Collector v1.1 active DAG replay 上实现 shadow-mode `Pcrit/Score`。
+2. 用四类确定性动态 fixture 验证关键性排序和未来标签隔离。
 3. 仅对明确包含 parents/retry/pruning 的 Agent trace 增加动态 workload adapter。
 4. 合并真实 QoS queue、源端 fanout/speculation control 和新的
    speculative-pressure 信号。
