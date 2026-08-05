@@ -1,6 +1,6 @@
 # 当前项目状态
 
-更新时间：2026-08-01
+更新时间：2026-08-05
 
 ## 已实现
 
@@ -35,6 +35,9 @@
   入口 smoke；30-episode paired preflight 与 5-seed、90-episode、10-run 的 V2 vs V3
   正式配对实验均已通过，Trace Commons 仅作校验，VTCode 与 Exgentic 不进入真实 workload。
 - 渐进式 speculation admission、运行中追加与停止 branch 仍明确延期。
+- 新增默认关闭的 Workflow Hint Collector v1：记录内容无关的 step/DAG hints、
+  动态生命周期、三类依赖、失败重试和 Judge 采用事件；提供 JSONL/summary 输出、
+  DAG 校验、隐私字段边界和 on/off 等价回归。当前输入仍来自固定模板 adapter。
 
 ## 当前默认配置
 
@@ -63,6 +66,9 @@
 - `trace_driven_v3_candidate` 同样使用固定模板；SWE-chat 不提供真实 deadline/network，
   不同 agent 的 timing 覆盖不一致。正式实验表明 source/Slack/负载覆盖合理且训练稳定，
   但性能差异包含 required/optional work 映射变化，不能描述为 Controller 算法提升。
+- Workflow Hint Collector 已支持动态事件接口，但动态 DAG 执行器尚未实现；当前
+  `Planner -> Branches -> LLM -> Judge` 仍是固定模板，Collector 本身不计算
+  `Pcrit/Score`，也不改变 Controller 或调度。
 
 ## 合并时的约束
 
@@ -74,9 +80,11 @@
 
 ## 下一步
 
-1. 合并真实 QoS queue 实现。
-2. 合并真实源端 fanout/speculation control。
-3. 合并新的 speculative-pressure 信号。
+1. 基于 Collector 接口实现动态 DAG 执行器，并验证在线新增、依赖解锁、失败重试和
+   Judge 剪枝。
+2. 在 Collector 输出上实现 shadow-mode `Pcrit/Score`。
+3. 合并真实 QoS queue、源端 fanout/speculation control 和新的
+   speculative-pressure 信号。
 4. 在相同 reward、action 和 workload 下重新运行 Controller ablation。
 5. 在独立 PR 中评估 path-aware congestion 与 Slack，避免与本次调度改动混合。
 6. 动态 DAG 等模块就绪后，再设计 V2-B 和 tau3 外部 benchmark runner。

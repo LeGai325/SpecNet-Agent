@@ -21,6 +21,13 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 
+try:
+    from workflow_hints import SCHEMA_VERSION as WORKFLOW_HINT_SCHEMA_VERSION
+    from workflow_hints import WorkflowHintCollector
+except ImportError:  # pragma: no cover - package-style imports
+    from .workflow_hints import SCHEMA_VERSION as WORKFLOW_HINT_SCHEMA_VERSION
+    from .workflow_hints import WorkflowHintCollector
+
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -70,6 +77,7 @@ StateKey = Tuple[str, ...]
 SLACK_QUEUE_BASES = ("total", "policy_weighted")
 DEFAULT_SLACK_QUEUE_BASIS = "total"
 DEFAULT_SLACK_QUEUE_WEIGHT = 1.0
+WORKFLOW_HINT_MODES = ("off", "record")
 SLACK_ESTIMATORS = {
     "total": "work_queue_aware_v2",
     "policy_weighted": "role_weighted_queue_v2_1",
@@ -903,6 +911,7 @@ class Simulator:
         quality_target: float = DEFAULT_QUALITY_TARGET,
         quality_hard_floor: float = DEFAULT_QUALITY_HARD_FLOOR,
         safety_guard: bool = False,
+        workflow_hints: str = "off",
     ) -> None:
         if slack_queue_basis not in SLACK_QUEUE_BASES:
             raise ValueError(f"unknown Slack queue basis: {slack_queue_basis}")
@@ -918,6 +927,8 @@ class Simulator:
             raise ValueError("single-bottleneck capacity only applies to single_bottleneck")
         if action_coupling not in ACTION_COUPLING_MODES:
             raise ValueError(f"unknown action coupling mode: {action_coupling}")
+        if workflow_hints not in WORKFLOW_HINT_MODES:
+            raise ValueError(f"unknown workflow-hint mode: {workflow_hints}")
         self.specs = list(specs)
         self.policy = policy
         self.load = load
@@ -932,6 +943,10 @@ class Simulator:
         self.quality_target = quality_target
         self.quality_hard_floor = quality_hard_floor
         self.safety_guard = safety_guard
+        self.workflow_hint_mode = workflow_hints
+        self.workflow_hint_collector = (
+            WorkflowHintCollector() if workflow_hints == "record" else None
+        )
         self.capacity = (
             single_bottleneck_capacity
             if single_bottleneck_capacity is not None
@@ -945,6 +960,7 @@ class Simulator:
         self.time = 0
         self.next_flow_id = 0
         self.flows: Dict[int, Flow] = {}
+        self.flow_hint_steps: Dict[int, str] = {}
         self.workflows: Dict[int, WorkflowRuntime] = {
             spec.workflow_id: WorkflowRuntime(spec=spec) for spec in specs
         }
@@ -1017,6 +1033,153 @@ class Simulator:
         self.flows[flow.flow_id] = flow
         self.next_flow_id += 1
         return flow.flow_id
+
+    def register_workflow_hints(self, workflow: WorkflowRuntime) -> None:
+        """Register one arrived workflow without changing simulator behavior."""
+
+        if self.workflow_hint_collector is None:
+            return
+        self.workflow_hint_collector.register_workflow(
+            workflow.spec.workflow_id,
+            deadline_hint=workflow.spec.arrival_time + workflow.spec.deadline,
+            timestamp=self.time,
+            source="fixed_template_adapter",
+            clock_domain="simulator_step",
+        )
+
+    def hint_timestamp(
+        self,
+        workflow: WorkflowRuntime,
+        parents: Iterable[str] = (),
+    ) -> float:
+        """Keep child events ordered after already-observed parent events."""
+
+        timestamp = float(self.time)
+        if self.workflow_hint_collector is None:
+            return timestamp
+        for parent in parents:
+            timestamp = max(
+                timestamp,
+                self.workflow_hint_collector.step(
+                    workflow.spec.workflow_id,
+                    parent,
+                ).last_timestamp,
+            )
+        return timestamp
+
+    def start_flow_hint(
+        self,
+        workflow: WorkflowRuntime,
+        flow_id: int,
+        *,
+        step_id: str,
+        parents: Iterable[str] = (),
+        dependency_kind: str = "hard_dependency",
+        speculation_level: float = 0.0,
+    ) -> None:
+        """Record create/ready/start events for a simulator flow."""
+
+        if self.workflow_hint_collector is None:
+            return
+        parent_ids = tuple(parents)
+        timestamp = self.hint_timestamp(workflow, parent_ids)
+        flow = self.flows[flow_id]
+        self.workflow_hint_collector.create_step(
+            workflow.spec.workflow_id,
+            step_id,
+            parents=parent_ids,
+            dependency_kinds={parent: dependency_kind for parent in parent_ids},
+            request_type=flow.service_type,
+            size_hint=flow.size,
+            size_unit="normalized_work",
+            speculation_level=speculation_level,
+            timestamp=timestamp,
+            source="fixed_template_adapter",
+        )
+        self.workflow_hint_collector.mark_ready(
+            workflow.spec.workflow_id,
+            step_id,
+            timestamp=timestamp,
+        )
+        self.workflow_hint_collector.start_step(
+            workflow.spec.workflow_id,
+            step_id,
+            timestamp=timestamp,
+        )
+        self.flow_hint_steps[flow_id] = step_id
+
+    def complete_flow_hint(self, flow: Flow) -> None:
+        if self.workflow_hint_collector is None or flow.flow_id not in self.flow_hint_steps:
+            return
+        step_id = self.flow_hint_steps[flow.flow_id]
+        timestamp = max(float(self.time), float(flow.completed_at or self.time))
+        self.workflow_hint_collector.complete_step(
+            flow.workflow_id,
+            step_id,
+            timestamp=timestamp,
+        )
+
+    def cancel_flow_hint(self, flow: Flow, *, timestamp: Optional[float] = None) -> None:
+        if self.workflow_hint_collector is None or flow.flow_id not in self.flow_hint_steps:
+            return
+        step_id = self.flow_hint_steps[flow.flow_id]
+        step = self.workflow_hint_collector.step(flow.workflow_id, step_id)
+        if step.state in {"completed", "failed", "cancelled"}:
+            return
+        event_time = max(float(self.time if timestamp is None else timestamp), step.last_timestamp)
+        self.workflow_hint_collector.cancel_step(
+            flow.workflow_id,
+            step_id,
+            timestamp=event_time,
+        )
+
+    def select_flow_hint(self, flow: Flow) -> None:
+        if self.workflow_hint_collector is None or flow.flow_id not in self.flow_hint_steps:
+            return
+        step_id = self.flow_hint_steps[flow.flow_id]
+        step = self.workflow_hint_collector.step(flow.workflow_id, step_id)
+        event_time = max(float(self.time), step.last_timestamp)
+        self.workflow_hint_collector.mark_selected(
+            flow.workflow_id,
+            step_id,
+            timestamp=event_time,
+        )
+
+    def cancel_open_workflow_hints(
+        self,
+        workflow: WorkflowRuntime,
+        *,
+        timestamp: float,
+    ) -> None:
+        if self.workflow_hint_collector is None:
+            return
+        for flow_id, step_id in self.flow_hint_steps.items():
+            flow = self.flows[flow_id]
+            if flow.workflow_id != workflow.spec.workflow_id:
+                continue
+            step = self.workflow_hint_collector.step(flow.workflow_id, step_id)
+            if step.state not in {"completed", "failed", "cancelled"}:
+                self.cancel_flow_hint(flow, timestamp=timestamp)
+
+    def finalize_workflow_hints(
+        self,
+        workflow: WorkflowRuntime,
+        *,
+        status: str,
+        timestamp: float,
+    ) -> None:
+        if self.workflow_hint_collector is None:
+            return
+        workflow_hint = self.workflow_hint_collector.workflows[str(workflow.spec.workflow_id)]
+        event_time = max(
+            [float(timestamp)]
+            + [step.last_timestamp for step in workflow_hint.steps.values()]
+        )
+        self.workflow_hint_collector.finalize_workflow(
+            workflow.spec.workflow_id,
+            timestamp=event_time,
+            status=status,
+        )
 
     def active_flows(self) -> List[Flow]:
         return [
@@ -1202,6 +1365,7 @@ class Simulator:
             if workflow.stage == "not_arrived" and workflow.spec.arrival_time <= self.time:
                 workflow.stage = "planner"
                 workflow.start_time = self.time
+                self.register_workflow_hints(workflow)
                 workflow.planner_flow = self.new_flow(
                     workflow,
                     "planner",
@@ -1209,6 +1373,11 @@ class Simulator:
                     role="critical_control",
                     stage="planner",
                     required=True,
+                )
+                self.start_flow_hint(
+                    workflow,
+                    workflow.planner_flow,
+                    step_id="planner",
                 )
 
     def completed(self, flow_id: Optional[int]) -> bool:
@@ -1360,6 +1529,14 @@ class Simulator:
                 expected_utility=branch.expected_utility,
             )
             workflow.branch_flows.append(flow_id)
+            self.start_flow_hint(
+                workflow,
+                flow_id,
+                step_id=f"branch:{branch.branch_index}",
+                parents=("planner",),
+                dependency_kind="control_trigger",
+                speculation_level=0.0 if required else 1.0,
+            )
             if required:
                 workflow.required_branch_flows.append(flow_id)
             else:
@@ -1367,7 +1544,7 @@ class Simulator:
 
         background_scale = self.background_scale_for_action(action)
         if background_scale > 0.0:
-            for size in workflow.spec.background_sizes:
+            for background_index, size in enumerate(workflow.spec.background_sizes):
                 scaled_size = max(1.0, size * background_scale)
                 flow_id = self.new_flow(
                     workflow,
@@ -1378,6 +1555,14 @@ class Simulator:
                     background=True,
                 )
                 workflow.background_flows.append(flow_id)
+                self.start_flow_hint(
+                    workflow,
+                    flow_id,
+                    step_id=f"background:{background_index}",
+                    parents=("planner",),
+                    dependency_kind="control_trigger",
+                    speculation_level=1.0,
+                )
 
     def progress_workflows(self) -> None:
         for workflow in self.workflows.values():
@@ -1395,6 +1580,18 @@ class Simulator:
                     stage="llm",
                     required=True,
                 )
+                required_parents = tuple(
+                    self.flow_hint_steps[flow_id]
+                    for flow_id in workflow.required_branch_flows
+                    if flow_id in self.flow_hint_steps
+                )
+                self.start_flow_hint(
+                    workflow,
+                    workflow.llm_flow,
+                    step_id="llm",
+                    parents=required_parents,
+                    dependency_kind="hard_dependency",
+                )
             elif workflow.stage == "llm" and self.completed(workflow.llm_flow):
                 workflow.stage = "judge"
                 workflow.judge_flow = self.new_flow(
@@ -1404,6 +1601,13 @@ class Simulator:
                     role="critical_control",
                     stage="judge",
                     required=True,
+                )
+                self.start_flow_hint(
+                    workflow,
+                    workflow.judge_flow,
+                    step_id="judge",
+                    parents=("llm",),
+                    dependency_kind="hard_dependency",
                 )
             elif workflow.stage == "judge" and self.completed(workflow.judge_flow):
                 self.finish_workflow(workflow)
@@ -1417,6 +1621,12 @@ class Simulator:
             workflow.background_bytes_served += flow.served
             if flow.completed_at is None:
                 flow.cancelled = True
+                self.cancel_flow_hint(flow)
+        self.finalize_workflow_hints(
+            workflow,
+            status="completed",
+            timestamp=self.time,
+        )
         self.completed_workflows.append(workflow)
         self.policy.on_workflow_complete(workflow, self)
 
@@ -1446,6 +1656,7 @@ class Simulator:
         used_ids = {flow.flow_id for flow in used}
         for flow in used:
             flow.used_by_judge = True
+            self.select_flow_hint(flow)
             workflow.useful_speculative_bytes += flow.served
             workflow.selected_optional_utility += flow.expected_utility
         workflow.retained_optional_count = len(used)
@@ -1457,6 +1668,7 @@ class Simulator:
                 workflow.unused_speculative_bytes += flow.served
             if flow.completed_at is None:
                 flow.cancelled = True
+                self.cancel_flow_hint(flow)
 
         if workflow.total_optional_utility <= 1e-12:
             workflow.quality = 1.0
@@ -1501,6 +1713,7 @@ class Simulator:
             for flow in candidates:
                 if flow.remaining <= 1e-9 and flow.completed_at is None:
                     flow.completed_at = self.time + 1
+                    self.complete_flow_hint(flow)
                 elif flow.remaining > 1e-9:
                     next_candidates.append(flow)
             remaining_capacity -= served_this_round
@@ -1613,6 +1826,8 @@ class Simulator:
                 break
 
         # Mark unfinished workflows as timed out at max_time.
+        simulation_end_time = self.time
+        self.time = self.max_time
         for workflow in self.workflows.values():
             if workflow.complete_time is None and workflow.stage != "not_arrived":
                 workflow.complete_time = self.max_time
@@ -1622,7 +1837,18 @@ class Simulator:
                     workflow.background_bytes_served += flow.served
                     if flow.completed_at is None:
                         flow.cancelled = True
+                        self.cancel_flow_hint(flow, timestamp=self.max_time)
+                self.cancel_open_workflow_hints(
+                    workflow,
+                    timestamp=self.max_time,
+                )
+                self.finalize_workflow_hints(
+                    workflow,
+                    status="timed_out",
+                    timestamp=self.max_time,
+                )
                 self.completed_workflows.append(workflow)
+        self.time = simulation_end_time
 
         return self.summary()
 
@@ -1818,7 +2044,7 @@ class Simulator:
             if self.network_model == "service_paths_borrowing"
             else []
         )
-        return {
+        summary = {
             "policy": self.policy.name,
             "load": self.load,
             "seed": self.seed,
@@ -1850,6 +2076,10 @@ class Simulator:
             "path_records": path_records,
             "path_borrowing_records": path_borrowing_records,
         }
+        if self.workflow_hint_collector is not None:
+            summary["workflow_hint_events"] = self.workflow_hint_collector.event_dicts()
+            summary["workflow_hint_summary"] = self.workflow_hint_collector.summary()
+        return summary
 
 
 def make_policy(name: str, seed: int, trained_bandit: Optional[SpecNetAgentBanditPolicy] = None) -> Policy:
@@ -1944,6 +2174,33 @@ def parse_controller_variants(args: argparse.Namespace) -> List[str]:
     if len(set(variants)) != len(variants):
         raise SystemExit("Controller variants must not contain duplicates.")
     return variants
+
+
+def parse_workflow_hint_policy_selectors(text: str) -> List[str]:
+    selectors = [item.strip() for item in text.split(",") if item.strip()]
+    if not selectors:
+        raise SystemExit("At least one workflow-hint policy selector is required.")
+    if "all" in selectors and len(selectors) != 1:
+        raise SystemExit("The workflow-hint selector 'all' cannot be combined with policy names.")
+    if len(set(selectors)) != len(selectors):
+        raise SystemExit("Workflow-hint policy selectors must not contain duplicates.")
+    return selectors
+
+
+def should_record_workflow_hints(
+    mode: str,
+    selectors: List[str],
+    policy_name: str,
+) -> bool:
+    if mode != "record":
+        return False
+    if selectors == ["all"]:
+        return True
+    return any(
+        policy_name == selector
+        or (selector == "specnet_agent" and policy_name.startswith("specnet_agent"))
+        for selector in selectors
+    )
 
 
 def parse_checkpoint_episodes(text: str) -> List[int]:
@@ -2394,6 +2651,55 @@ def write_json(path: str, data: object) -> None:
         json.dump(data, f, indent=2, sort_keys=True)
 
 
+def write_jsonl(path: str, rows: List[Dict[str, object]]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, sort_keys=True))
+            f.write("\n")
+
+
+def aggregate_workflow_hint_runs(
+    run_summaries: List[Dict[str, object]],
+) -> Dict[str, object]:
+    count_fields = (
+        "workflows_registered",
+        "workflows_finalized",
+        "steps_recorded",
+        "events_recorded",
+        "selected_steps",
+        "validation_errors",
+    )
+    mapping_fields = (
+        "events_by_type",
+        "request_types",
+        "dependency_kinds",
+        "speculation_levels",
+        "workflow_statuses",
+        "sources",
+    )
+    totals = {field: 0 for field in count_fields}
+    mapping_totals = {field: Counter() for field in mapping_fields}
+    for summary in run_summaries:
+        for field in count_fields:
+            totals[field] += int(summary.get(field, 0))
+        for field in mapping_fields:
+            mapping_totals[field].update(summary.get(field, {}))
+    return {
+        "schema_version": WORKFLOW_HINT_SCHEMA_VERSION,
+        "mode": "record",
+        "run_count": len(run_summaries),
+        "totals": {
+            **totals,
+            **{
+                field: dict(sorted(counter.items()))
+                for field, counter in mapping_totals.items()
+            },
+        },
+        "runs": run_summaries,
+    }
+
+
 def parse_args() -> argparse.Namespace:
     default_quality_weights_text = ",".join(str(weight) for weight in DEFAULT_QUALITY_WEIGHTS)
     parser = argparse.ArgumentParser(description="Run SpecNet-Agent simulation experiments.")
@@ -2573,6 +2879,24 @@ def parse_args() -> argparse.Namespace:
         help="Apply the per-workflow predicted-quality guard before executing an action.",
     )
     parser.add_argument(
+        "--workflow-hints",
+        choices=WORKFLOW_HINT_MODES,
+        default="off",
+        help=(
+            "Record content-free workflow DAG hint events during evaluation. "
+            "The default 'off' preserves historical outputs and behavior."
+        ),
+    )
+    parser.add_argument(
+        "--workflow-hint-policies",
+        default="specnet_agent",
+        help=(
+            "Comma-separated policies whose evaluation runs emit hints. "
+            "'specnet_agent' matches all trained SpecNet variants; use 'all' "
+            "to include baselines."
+        ),
+    )
+    parser.add_argument(
         "--lambda-initial",
         type=float,
         default=DEFAULT_LAMBDA_INITIAL,
@@ -2599,6 +2923,9 @@ def main() -> None:
     quality_weights = parse_quality_weights(args)
     train_seeds = parse_train_seeds(args)
     controller_variants = parse_controller_variants(args)
+    workflow_hint_policy_selectors = parse_workflow_hint_policy_selectors(
+        args.workflow_hint_policies
+    )
     checkpoint_episodes = parse_checkpoint_episodes(args.checkpoint_episodes)
     eval_seed = args.eval_seed if args.eval_seed is not None else args.seed
     validation_seed = args.validation_seed if args.validation_seed is not None else eval_seed + 500000
@@ -2782,6 +3109,16 @@ def main() -> None:
         "rule_balanced",
         "rule_quality_preserving",
     ] + list(trained_policies.keys())
+    invalid_hint_policy_selectors = [
+        selector
+        for selector in workflow_hint_policy_selectors
+        if selector not in {"all", "specnet_agent"} and selector not in policies
+    ]
+    if invalid_hint_policy_selectors:
+        raise SystemExit(
+            "Invalid workflow-hint policy selectors: "
+            f"{invalid_hint_policy_selectors}. Available policies: {policies}"
+        )
 
     summaries: List[Dict[str, object]] = []
     workflow_rows: List[Dict[str, object]] = []
@@ -2789,6 +3126,8 @@ def main() -> None:
     raw_action_rows: List[Dict[str, object]] = []
     path_rows: List[Dict[str, object]] = []
     path_borrowing_rows: List[Dict[str, object]] = []
+    workflow_hint_rows: List[Dict[str, object]] = []
+    workflow_hint_run_summaries: List[Dict[str, object]] = []
 
     for load in loads:
         for run_index in range(args.eval_runs):
@@ -2830,6 +3169,15 @@ def main() -> None:
                     quality_target=args.quality_target,
                     quality_hard_floor=args.quality_hard_floor,
                     safety_guard=safety_guard,
+                    workflow_hints=(
+                        "record"
+                        if should_record_workflow_hints(
+                            args.workflow_hints,
+                            workflow_hint_policy_selectors,
+                            policy_name,
+                        )
+                        else "off"
+                    ),
                 )
                 summary = sim.run()
                 summary["policy"] = policy_name
@@ -2846,6 +3194,25 @@ def main() -> None:
                 summary["train_seed"] = train_seed
                 summary["eval_seed"] = eval_seed
                 summary["run"] = run_index
+                hint_context = {
+                    "load": load,
+                    "policy": policy_name,
+                    "controller_variant": controller_variant,
+                    "quality_weight": quality_weight,
+                    "train_seed": train_seed,
+                    "eval_seed": eval_seed,
+                    "run": run_index,
+                    "seed": workload_seed,
+                }
+                if summary.get("workflow_hint_summary") is not None:
+                    workflow_hint_run_summaries.append(
+                        {
+                            **hint_context,
+                            **summary["workflow_hint_summary"],
+                        }
+                    )
+                    for event in summary.get("workflow_hint_events", []):
+                        workflow_hint_rows.append({**hint_context, **event})
                 summaries.append(
                     {
                         k: v
@@ -2857,6 +3224,8 @@ def main() -> None:
                             "raw_action_counts",
                             "path_records",
                             "path_borrowing_records",
+                            "workflow_hint_events",
+                            "workflow_hint_summary",
                         )
                     }
                 )
@@ -2973,6 +3342,15 @@ def main() -> None:
         os.path.join(args.output_dir, "path_borrowing_results.csv"),
         path_borrowing_rows,
     )
+    if args.workflow_hints == "record":
+        write_jsonl(
+            os.path.join(args.output_dir, "workflow_hints.jsonl"),
+            workflow_hint_rows,
+        )
+        write_json(
+            os.path.join(args.output_dir, "workflow_hint_summary.json"),
+            aggregate_workflow_hint_runs(workflow_hint_run_summaries),
+        )
     write_json(
         os.path.join(args.output_dir, "specnet_agent_model.json"),
         {
@@ -2987,6 +3365,19 @@ def main() -> None:
                     "evaluation": "test",
                 },
             },
+            **(
+                {
+                    "workflow_hints": {
+                        "mode": args.workflow_hints,
+                        "schema_version": WORKFLOW_HINT_SCHEMA_VERSION,
+                        "source": "fixed_template_adapter",
+                        "affects_policy": False,
+                        "policy_selectors": workflow_hint_policy_selectors,
+                    }
+                }
+                if args.workflow_hints == "record"
+                else {}
+            ),
             "quality_constraints": {
                 "quality_target": args.quality_target,
                 "quality_hard_floor": args.quality_hard_floor,

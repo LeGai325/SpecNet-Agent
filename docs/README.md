@@ -14,5 +14,6 @@
   V3 候选筛选、全量预检证据和下一步准入方案。
 - [`DATA_SETUP.md`](DATA_SETUP.md)：团队成员下载、校验、构建和运行 V1/V2/V3 profile 的
   最短流程。
+- [`WORKFLOW_HINT_COLLECTOR.md`](WORKFLOW_HINT_COLLECTOR.md)：Collector 数据契约、启用方式、输出、测试和动态 DAG 衔接。
 
 个人实验过程、完整消融报告、调参记录和原始输出不放入协作仓库，由各负责人自行保存。

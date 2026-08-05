@@ -42,6 +42,19 @@ TraceLab 与 SWE-chat。SWE-chat 先按 content hash 去重，再按 repo-user �
 只使用清洗后可配对的 tool interval，不把原始 session duration 当连续服务时间。V3 仍是
 固定模板候选，不是动态 DAG 回放。
 
+### Workflow Hint Collector
+
+可选 `--workflow-hints record` 在 evaluation 中以 shadow mode 记录 workflow DAG
+元数据。Collector 位于 `specnet_agent_experiments/workflow_hints.py`，记录
+`workflow_id`、`step_id`、parents、依赖类型、request type、deadline、size、
+speculation level 及 created/ready/started/completed/failed/retried/cancelled/selected
+事件。默认 `off` 不实例化 Collector，也不改变历史输出。
+
+当前 adapter 将固定 `Planner -> Branches -> LLM -> Judge` 结构转换为 hints，且明确
+标记 `fixed_template_adapter`。Collector API 可以记录运行中新增和剪枝事件，但动态
+DAG 的创建、解锁、失败重试和 Judge 剪枝仍应由后续独立 runtime 执行器负责。详细契约
+见 `docs/WORKFLOW_HINT_COLLECTOR.md`。
+
 ## Policy 和 Controller
 
 `Policy` 是所有策略的基类，主要扩展点是：
