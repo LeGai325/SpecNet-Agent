@@ -1,6 +1,6 @@
 # 当前项目状态
 
-更新时间：2026-08-05
+更新时间：2026-08-06
 
 ## 已实现
 
@@ -46,7 +46,9 @@
   完成 workflow 的平滑历史采用率、CostDelay、remaining size、active fanout、Age 和
   SpecPenalty；逐 component 输出且不影响 Policy、Controller、Guard 或 reward。四类动态
   fixture、三档容量、四个敏感性 profile 共 48 个组合通过，off/shadow 精确等价，全套
-  99 项测试通过。
+  127 项测试通过。
+- 数据 V3 合并后的 Collector + Pcrit off/shadow 联合 smoke 已通过：10 个既有输出逐字节
+  一致，shadow 在三档负载覆盖 782 条 flow、生成 13,168 条有限评分记录。
 
 ## 当前默认配置
 

@@ -156,6 +156,22 @@ unselected optional。四个 profile 的 AUC 范围为 0.627–0.671。这个结
 的 evaluation policy 上启用，不应无条件覆盖所有训练 episode 和 baseline。该结果是本机小型
 实现开销，不代表真实系统 dataplane 开销。
 
+### V3 联合回归
+
+在合并冻结数据 V3 的最新主线后，使用相同 `trace_driven_v3_candidate` workload 分别运行
+Collector record + Pcrit off 和 Collector record + Pcrit shadow。两组均使用 3 个训练
+episode、三档负载、每档 1 个 evaluation run、最多 30 个 workflow。
+
+- `action_counts.csv`、`raw_action_counts.csv`、`summary_by_run.csv`、
+  `summary_aggregate.csv`、`workflow_results.csv`、Collector JSONL/summary 等 10 个既有
+  输出文件逐字节一致；
+- shadow 共覆盖 3 个 run、782 条 flow，生成 13,168 条评分记录，3/3 run 全部分数有限；
+- 只有 shadow 侧新增 criticality JSONL/summary 和 model metadata；
+- 该 smoke 证明 V3、Collector、动态 DAG 基础模块和 Pcrit/Score 可以在同一最新代码基线
+  中运行，不用于解释参数优劣或端到端性能收益。
+
+本地 ignored 输出位于 `outputs/pcrit_v3_combined_smoke/`，不进入 Git。
+
 ## 当前限制
 
 - 默认固定 workflow adapter 只在步骤实际创建时暴露节点，早期 flow 看不到尚未创建的未来
@@ -179,5 +195,5 @@ python3 -m py_compile \
 python3 -m unittest discover -s specnet_agent_experiments -p 'test_*.py'
 ```
 
-当前实验目录共 99 项测试通过，其中 10 项直接覆盖 Pcrit/Score。v1.0 和 v1.1 Collector
+合并数据 V3 后，当前实验目录共 127 项测试通过，其中 10 项直接覆盖 Pcrit/Score。v1.0 和 v1.1 Collector
 replay 产生相同结构特征，size=0 不会产生 NaN/Inf，且 history 更新边界有独立测试。
