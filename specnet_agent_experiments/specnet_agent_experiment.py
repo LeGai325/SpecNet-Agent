@@ -22,9 +22,37 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 
 try:
+    from criticality_history import (
+        SelectionHistory,
+        SelectionHistoryKey,
+        SelectionObservation,
+    )
+    from criticality_scoring import (
+        CRITICALITY_PROFILES,
+        SCORER_VERSION as CRITICALITY_SCORER_VERSION,
+        CriticalityInputs,
+        config_for_profile,
+        derive_all_graph_features,
+        derive_graph_features,
+        score_criticality,
+    )
     from workflow_hints import SCHEMA_VERSION as WORKFLOW_HINT_SCHEMA_VERSION
     from workflow_hints import WorkflowHintCollector
 except ImportError:  # pragma: no cover - package-style imports
+    from .criticality_history import (
+        SelectionHistory,
+        SelectionHistoryKey,
+        SelectionObservation,
+    )
+    from .criticality_scoring import (
+        CRITICALITY_PROFILES,
+        SCORER_VERSION as CRITICALITY_SCORER_VERSION,
+        CriticalityInputs,
+        config_for_profile,
+        derive_all_graph_features,
+        derive_graph_features,
+        score_criticality,
+    )
     from .workflow_hints import SCHEMA_VERSION as WORKFLOW_HINT_SCHEMA_VERSION
     from .workflow_hints import WorkflowHintCollector
 
@@ -78,6 +106,7 @@ SLACK_QUEUE_BASES = ("total", "policy_weighted")
 DEFAULT_SLACK_QUEUE_BASIS = "total"
 DEFAULT_SLACK_QUEUE_WEIGHT = 1.0
 WORKFLOW_HINT_MODES = ("off", "record")
+CRITICALITY_SCORING_MODES = ("off", "shadow")
 SLACK_ESTIMATORS = {
     "total": "work_queue_aware_v2",
     "policy_weighted": "role_weighted_queue_v2_1",
@@ -912,6 +941,9 @@ class Simulator:
         quality_hard_floor: float = DEFAULT_QUALITY_HARD_FLOOR,
         safety_guard: bool = False,
         workflow_hints: str = "off",
+        criticality_scoring: str = "off",
+        criticality_profile: str = "balanced",
+        criticality_score_epoch: int = 5,
     ) -> None:
         if slack_queue_basis not in SLACK_QUEUE_BASES:
             raise ValueError(f"unknown Slack queue basis: {slack_queue_basis}")
@@ -929,6 +961,12 @@ class Simulator:
             raise ValueError(f"unknown action coupling mode: {action_coupling}")
         if workflow_hints not in WORKFLOW_HINT_MODES:
             raise ValueError(f"unknown workflow-hint mode: {workflow_hints}")
+        if criticality_scoring not in CRITICALITY_SCORING_MODES:
+            raise ValueError(f"unknown criticality-scoring mode: {criticality_scoring}")
+        if criticality_profile not in CRITICALITY_PROFILES:
+            raise ValueError(f"unknown criticality profile: {criticality_profile}")
+        if criticality_score_epoch <= 0:
+            raise ValueError("criticality score epoch must be positive")
         self.specs = list(specs)
         self.policy = policy
         self.load = load
@@ -944,8 +982,22 @@ class Simulator:
         self.quality_hard_floor = quality_hard_floor
         self.safety_guard = safety_guard
         self.workflow_hint_mode = workflow_hints
+        self.criticality_scoring_mode = criticality_scoring
+        self.criticality_config = (
+            config_for_profile(criticality_profile)
+            if criticality_scoring == "shadow"
+            else None
+        )
+        self.criticality_score_epoch = criticality_score_epoch
+        self.criticality_history = (
+            SelectionHistory() if criticality_scoring == "shadow" else None
+        )
+        self.criticality_score_records: List[Dict[str, object]] = []
+        self.criticality_seen_flow_ids: set[int] = set()
         self.workflow_hint_collector = (
-            WorkflowHintCollector() if workflow_hints == "record" else None
+            WorkflowHintCollector()
+            if workflow_hints == "record" or criticality_scoring == "shadow"
+            else None
         )
         self.capacity = (
             single_bottleneck_capacity
@@ -1188,6 +1240,277 @@ class Simulator:
             timestamp=event_time,
             status=status,
         )
+
+    def criticality_graph_snapshot(self, workflow_id: object) -> Dict[str, object]:
+        """Build a current content-free graph view without replaying future events."""
+
+        if self.workflow_hint_collector is None:
+            return {"workflow_id": str(workflow_id), "steps": {}}
+        workflow_hint = self.workflow_hint_collector.workflows[str(workflow_id)]
+        return {
+            "workflow_id": workflow_hint.workflow_id,
+            "status": workflow_hint.status,
+            "steps": {
+                step_id: {
+                    "parents": list(step.parents),
+                    "dependency_kinds": dict(step.dependency_kinds),
+                    "request_type": step.request_type,
+                    "size_hint": step.size_hint,
+                    "size_unit": step.size_unit,
+                    "speculation_level": step.speculation_level,
+                    "state": step.state,
+                    "attempt_id": step.attempt_id,
+                    "selected": step.selected,
+                }
+                for step_id, step in sorted(workflow_hint.steps.items())
+            },
+        }
+
+    @staticmethod
+    def criticality_optional_rank(
+        workflow: WorkflowRuntime,
+        step_id: str,
+        *,
+        required: bool,
+        fallback: int,
+    ) -> int:
+        """Map fixed-template branch IDs to rank among optional branches."""
+
+        if required:
+            return -1
+        if step_id.startswith("branch:"):
+            try:
+                branch_index = int(step_id.rsplit(":", 1)[1])
+            except ValueError:
+                return fallback
+            optional_indices = [
+                branch.branch_index
+                for branch in workflow.spec.branches
+                if not branch.required
+            ]
+            try:
+                return optional_indices.index(branch_index)
+            except ValueError:
+                return fallback
+        return fallback
+
+    def record_criticality_scores(self) -> None:
+        """Observe active flows; never feed the resulting values into policy."""
+
+        if self.criticality_config is None or self.criticality_history is None:
+            return
+        active = self.active_flows()
+        active_ids = {flow.flow_id for flow in active}
+        force = bool(active_ids - self.criticality_seen_flow_ids)
+        if not force and self.time % self.criticality_score_epoch != 0:
+            return
+
+        snapshots: Dict[int, Dict[str, object]] = {}
+        graph_features: Dict[int, Dict[str, object]] = {}
+        for flow in sorted(active, key=lambda value: value.flow_id):
+            step_id = self.flow_hint_steps.get(flow.flow_id)
+            if step_id is None:
+                continue
+            workflow = self.workflows[flow.workflow_id]
+            if flow.workflow_id not in snapshots:
+                snapshots[flow.workflow_id] = self.criticality_graph_snapshot(
+                    flow.workflow_id
+                )
+                graph_features[flow.workflow_id] = derive_all_graph_features(
+                    snapshots[flow.workflow_id]
+                )
+            snapshot = snapshots[flow.workflow_id]
+            step = snapshot["steps"][step_id]
+            workflow_features = graph_features[flow.workflow_id]
+            graph = workflow_features[step_id]
+            history_rank = self.criticality_optional_rank(
+                workflow,
+                step_id,
+                required=flow.required,
+                fallback=graph.optional_rank,
+            )
+            history_key = SelectionHistoryKey(
+                template=workflow.spec.template,
+                request_type=flow.service_type,
+                dependency_role=graph.dependency_role,
+                optional_rank=history_rank,
+            )
+            history_probability, history_sample_count = self.criticality_history.probability(
+                history_key
+            )
+            inputs = CriticalityInputs(
+                workflow_id=str(flow.workflow_id),
+                step_id=step_id,
+                flow_id=str(flow.flow_id),
+                timestamp=float(self.time),
+                request_type=flow.service_type,
+                required=flow.required,
+                speculation_level=float(step["speculation_level"]),
+                size=flow.size,
+                remaining_size=flow.remaining,
+                created_at=float(flow.created_at),
+                slack_ratio=self.workflow_slack_ratio(workflow),
+                historical_selection_rate=history_probability,
+                history_sample_count=history_sample_count,
+                template=workflow.spec.template,
+                state=str(step["state"]),
+                attempt_id=int(step["attempt_id"]),
+                graph=graph,
+            )
+            result = score_criticality(inputs, self.criticality_config)
+            self.criticality_score_records.append(
+                {
+                    "workflow_id": flow.workflow_id,
+                    "template": workflow.spec.template,
+                    "step_id": step_id,
+                    "flow_id": flow.flow_id,
+                    "timestamp": self.time,
+                    "request_type": flow.service_type,
+                    "path_id": flow.path_id,
+                    "state": step["state"],
+                    "attempt_id": step["attempt_id"],
+                    "required": flow.required,
+                    "speculative": flow.speculative,
+                    "background": flow.background,
+                    "speculation_level": step["speculation_level"],
+                    "size": flow.size,
+                    "remaining_size": flow.remaining,
+                    "slack_ratio": inputs.slack_ratio,
+                    "dependency_role": graph.dependency_role,
+                    "optional_rank": history_rank,
+                    "is_final_step": graph.is_final_step,
+                    "blocks_final": graph.blocks_final,
+                    "direct_hard_children": graph.direct_hard_children,
+                    "downstream_hard_reachable": graph.downstream_hard_reachable,
+                    "downstream_total_reachable": graph.downstream_total_reachable,
+                    "history_sample_count": history_sample_count,
+                    **result.to_dict(),
+                }
+            )
+        self.criticality_seen_flow_ids.update(active_ids)
+
+    def record_finalized_criticality_history(self, workflow: WorkflowRuntime) -> None:
+        """Publish Judge outcomes only after the current workflow has finished."""
+
+        if self.criticality_history is None or self.workflow_hint_collector is None:
+            return
+        snapshot = self.criticality_graph_snapshot(workflow.spec.workflow_id)
+        workflow_hint = self.workflow_hint_collector.workflows[
+            str(workflow.spec.workflow_id)
+        ]
+        observations = []
+        for step_id, step in sorted(workflow_hint.steps.items()):
+            if step.speculation_level <= 0.0 or step.request_type == "background":
+                continue
+            graph = derive_graph_features(snapshot, step_id)
+            history_rank = self.criticality_optional_rank(
+                workflow,
+                step_id,
+                required=False,
+                fallback=graph.optional_rank,
+            )
+            observations.append(
+                SelectionObservation(
+                    key=SelectionHistoryKey(
+                        template=workflow.spec.template,
+                        request_type=step.request_type,
+                        dependency_role=graph.dependency_role,
+                        optional_rank=history_rank,
+                    ),
+                    selected=step.selected,
+                )
+            )
+        self.criticality_history.record_finalized_workflow(
+            workflow.spec.workflow_id,
+            observations,
+        )
+
+    def criticality_summary(self) -> Dict[str, object]:
+        records = self.criticality_score_records
+        scores = [float(record["score"]) for record in records]
+        pcrits = [float(record["pcrit"]) for record in records]
+        first_by_flow: Dict[int, Dict[str, object]] = {}
+        for record in records:
+            first_by_flow.setdefault(int(record["flow_id"]), record)
+        selected_optional = [
+            float(record["score"])
+            for flow_id, record in first_by_flow.items()
+            if bool(record["speculative"])
+            and not bool(record["background"])
+            and self.flows[flow_id].used_by_judge
+        ]
+        unselected_optional = [
+            float(record["score"])
+            for flow_id, record in first_by_flow.items()
+            if bool(record["speculative"])
+            and not bool(record["background"])
+            and not self.flows[flow_id].used_by_judge
+        ]
+        pairwise_total = len(selected_optional) * len(unselected_optional)
+        pairwise_wins = sum(
+            1.0 if selected > unselected else 0.5 if selected == unselected else 0.0
+            for selected in selected_optional
+            for unselected in unselected_optional
+        )
+        component_names = (
+            "structural_prior",
+            "urgency",
+            "history_probability",
+            "cost_delay",
+            "fanout_factor",
+            "size_cost",
+            "age_boost",
+            "spec_penalty",
+        )
+        return {
+            "mode": self.criticality_scoring_mode,
+            "scorer_version": CRITICALITY_SCORER_VERSION,
+            "profile": self.criticality_config.profile
+            if self.criticality_config is not None
+            else "",
+            "score_epoch": self.criticality_score_epoch,
+            "score_records": len(records),
+            "flows_scored": len({record["flow_id"] for record in records}),
+            "mean_score": statistics.mean(scores) if scores else 0.0,
+            "min_score": min(scores) if scores else 0.0,
+            "max_score": max(scores) if scores else 0.0,
+            "mean_pcrit": statistics.mean(pcrits) if pcrits else 0.0,
+            "request_types": dict(Counter(record["request_type"] for record in records)),
+            "dependency_roles": dict(
+                Counter(record["dependency_role"] for record in records)
+            ),
+            "required_records": sum(bool(record["required"]) for record in records),
+            "optional_records": sum(not bool(record["required"]) for record in records),
+            "finite_scores": all(math.isfinite(value) for value in scores),
+            "affects_policy": False,
+            "component_means": {
+                name: statistics.mean(float(record[name]) for record in records)
+                if records
+                else 0.0
+                for name in component_names
+            },
+            "offline_selection_diagnostic": {
+                "uses_future_labels_as_inputs": False,
+                "score_point": "first_observation",
+                "selected_optional_flows": len(selected_optional),
+                "unselected_optional_flows": len(unselected_optional),
+                "selected_mean_score": statistics.mean(selected_optional)
+                if selected_optional
+                else None,
+                "unselected_mean_score": statistics.mean(unselected_optional)
+                if unselected_optional
+                else None,
+                "pairwise_auc": pairwise_wins / pairwise_total
+                if pairwise_total
+                else None,
+            },
+            "config": self.criticality_config.to_dict()
+            if self.criticality_config is not None
+            else {},
+            "history": self.criticality_history.snapshot()
+            if self.criticality_history is not None
+            else {},
+        }
 
     def active_flows(self) -> List[Flow]:
         return [
@@ -1635,6 +1958,7 @@ class Simulator:
             status="completed",
             timestamp=self.time,
         )
+        self.record_finalized_criticality_history(workflow)
         self.completed_workflows.append(workflow)
         self.policy.on_workflow_complete(workflow, self)
 
@@ -1821,6 +2145,7 @@ class Simulator:
         for self.time in range(self.max_time):
             self.spawn_arrivals()
             self.progress_workflows()
+            self.record_criticality_scores()
             self.serve_active_flows()
             self.progress_workflows()
 
@@ -1860,6 +2185,7 @@ class Simulator:
                     status="timed_out",
                     timestamp=self.max_time,
                 )
+                self.record_finalized_criticality_history(workflow)
                 self.completed_workflows.append(workflow)
         self.time = simulation_end_time
 
@@ -2089,9 +2415,12 @@ class Simulator:
             "path_records": path_records,
             "path_borrowing_records": path_borrowing_records,
         }
-        if self.workflow_hint_collector is not None:
+        if self.workflow_hint_mode == "record" and self.workflow_hint_collector is not None:
             summary["workflow_hint_events"] = self.workflow_hint_collector.event_dicts()
             summary["workflow_hint_summary"] = self.workflow_hint_collector.summary()
+        if self.criticality_scoring_mode == "shadow":
+            summary["criticality_score_records"] = self.criticality_score_records
+            summary["criticality_summary"] = self.criticality_summary()
         return summary
 
 
@@ -2207,6 +2536,12 @@ def should_record_workflow_hints(
 ) -> bool:
     if mode != "record":
         return False
+    return policy_matches_selectors(selectors, policy_name)
+
+
+def policy_matches_selectors(selectors: List[str], policy_name: str) -> bool:
+    """Match exact policies plus the shared SpecNet-Agent selector."""
+
     if selectors == ["all"]:
         return True
     return any(
@@ -2714,6 +3049,25 @@ def aggregate_workflow_hint_runs(
     }
 
 
+def aggregate_criticality_runs(
+    run_summaries: List[Dict[str, object]],
+) -> Dict[str, object]:
+    """Keep per-run diagnostics while exposing small cross-run totals."""
+
+    return {
+        "mode": "shadow",
+        "scorer_version": CRITICALITY_SCORER_VERSION,
+        "run_count": len(run_summaries),
+        "totals": {
+            "score_records": sum(int(row.get("score_records", 0)) for row in run_summaries),
+            "flows_scored": sum(int(row.get("flows_scored", 0)) for row in run_summaries),
+            "finite_score_runs": sum(bool(row.get("finite_scores")) for row in run_summaries),
+        },
+        "affects_policy": False,
+        "runs": run_summaries,
+    }
+
+
 def parse_args() -> argparse.Namespace:
     default_quality_weights_text = ",".join(str(weight) for weight in DEFAULT_QUALITY_WEIGHTS)
     parser = argparse.ArgumentParser(description="Run SpecNet-Agent simulation experiments.")
@@ -2911,6 +3265,35 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--criticality-scoring",
+        choices=CRITICALITY_SCORING_MODES,
+        default="off",
+        help=(
+            "Compute and record Pcrit/Score without affecting scheduling. "
+            "The default 'off' preserves historical behavior and outputs."
+        ),
+    )
+    parser.add_argument(
+        "--criticality-profile",
+        choices=CRITICALITY_PROFILES,
+        default="balanced",
+        help="Preregistered mixture of DAG, Slack, and history signals.",
+    )
+    parser.add_argument(
+        "--criticality-score-epoch",
+        type=int,
+        default=5,
+        help="Periodic shadow-score interval; newly created flows are always scored.",
+    )
+    parser.add_argument(
+        "--criticality-policies",
+        default="specnet_agent",
+        help=(
+            "Comma-separated policies whose evaluation runs emit shadow scores. "
+            "Use 'all' to include baselines."
+        ),
+    )
+    parser.add_argument(
         "--lambda-initial",
         type=float,
         default=DEFAULT_LAMBDA_INITIAL,
@@ -2939,6 +3322,9 @@ def main() -> None:
     controller_variants = parse_controller_variants(args)
     workflow_hint_policy_selectors = parse_workflow_hint_policy_selectors(
         args.workflow_hint_policies
+    )
+    criticality_policy_selectors = parse_workflow_hint_policy_selectors(
+        args.criticality_policies
     )
     checkpoint_episodes = parse_checkpoint_episodes(args.checkpoint_episodes)
     eval_seed = args.eval_seed if args.eval_seed is not None else args.seed
@@ -2969,6 +3355,8 @@ def main() -> None:
         raise SystemExit(f"Invalid loads: {invalid_loads}")
     if args.slack_queue_weight < 0.0:
         raise SystemExit("--slack-queue-weight must be non-negative")
+    if args.criticality_score_epoch <= 0:
+        raise SystemExit("--criticality-score-epoch must be positive")
     if not 0.0 <= args.quality_hard_floor <= args.quality_target <= 1.0:
         raise SystemExit(
             "quality constraints must satisfy 0 <= --quality-hard-floor "
@@ -3133,6 +3521,16 @@ def main() -> None:
             "Invalid workflow-hint policy selectors: "
             f"{invalid_hint_policy_selectors}. Available policies: {policies}"
         )
+    invalid_criticality_policy_selectors = [
+        selector
+        for selector in criticality_policy_selectors
+        if selector not in {"all", "specnet_agent"} and selector not in policies
+    ]
+    if invalid_criticality_policy_selectors:
+        raise SystemExit(
+            "Invalid criticality policy selectors: "
+            f"{invalid_criticality_policy_selectors}. Available policies: {policies}"
+        )
 
     summaries: List[Dict[str, object]] = []
     workflow_rows: List[Dict[str, object]] = []
@@ -3142,6 +3540,8 @@ def main() -> None:
     path_borrowing_rows: List[Dict[str, object]] = []
     workflow_hint_rows: List[Dict[str, object]] = []
     workflow_hint_run_summaries: List[Dict[str, object]] = []
+    criticality_rows: List[Dict[str, object]] = []
+    criticality_run_summaries: List[Dict[str, object]] = []
 
     for load in loads:
         for run_index in range(args.eval_runs):
@@ -3192,6 +3592,17 @@ def main() -> None:
                         )
                         else "off"
                     ),
+                    criticality_scoring=(
+                        "shadow"
+                        if args.criticality_scoring == "shadow"
+                        and policy_matches_selectors(
+                            criticality_policy_selectors,
+                            policy_name,
+                        )
+                        else "off"
+                    ),
+                    criticality_profile=args.criticality_profile,
+                    criticality_score_epoch=args.criticality_score_epoch,
                 )
                 summary = sim.run()
                 summary["policy"] = policy_name
@@ -3227,6 +3638,15 @@ def main() -> None:
                     )
                     for event in summary.get("workflow_hint_events", []):
                         workflow_hint_rows.append({**hint_context, **event})
+                if summary.get("criticality_summary") is not None:
+                    criticality_run_summaries.append(
+                        {
+                            **hint_context,
+                            **summary["criticality_summary"],
+                        }
+                    )
+                    for record in summary.get("criticality_score_records", []):
+                        criticality_rows.append({**hint_context, **record})
                 summaries.append(
                     {
                         k: v
@@ -3240,6 +3660,8 @@ def main() -> None:
                             "path_borrowing_records",
                             "workflow_hint_events",
                             "workflow_hint_summary",
+                            "criticality_score_records",
+                            "criticality_summary",
                         )
                     }
                 )
@@ -3365,6 +3787,15 @@ def main() -> None:
             os.path.join(args.output_dir, "workflow_hint_summary.json"),
             aggregate_workflow_hint_runs(workflow_hint_run_summaries),
         )
+    if args.criticality_scoring == "shadow":
+        write_jsonl(
+            os.path.join(args.output_dir, "criticality_scores.jsonl"),
+            criticality_rows,
+        )
+        write_json(
+            os.path.join(args.output_dir, "criticality_summary.json"),
+            aggregate_criticality_runs(criticality_run_summaries),
+        )
     write_json(
         os.path.join(args.output_dir, "specnet_agent_model.json"),
         {
@@ -3390,6 +3821,25 @@ def main() -> None:
                     }
                 }
                 if args.workflow_hints == "record"
+                else {}
+            ),
+            **(
+                {
+                    "criticality_scoring": {
+                        "mode": args.criticality_scoring,
+                        "scorer_version": CRITICALITY_SCORER_VERSION,
+                        "profile": args.criticality_profile,
+                        "score_epoch": args.criticality_score_epoch,
+                        "policy_selectors": criticality_policy_selectors,
+                        "affects_policy": False,
+                        "config": config_for_profile(args.criticality_profile).to_dict(),
+                        "paper_formula": (
+                            "Pcrit*CostDelay/(epsilon+Size)*Fanout"
+                            "+Age-SpecPenalty"
+                        ),
+                    }
+                }
+                if args.criticality_scoring == "shadow"
                 else {}
             ),
             "quality_constraints": {

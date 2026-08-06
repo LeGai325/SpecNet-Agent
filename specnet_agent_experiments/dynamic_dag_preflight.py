@@ -180,6 +180,9 @@ class NetworkFixtureRunner:
         self.add("planner", 0.0, request_type="planner", size_hint=2.0)
         self.bridge.dispatch_ready(0, timestamp=0.0)
 
+    def observe_epoch(self, _timestamp: float) -> None:
+        """Optional read-only hook used by shadow-mode diagnostics."""
+
     def _react(self, timestamp: float) -> None:
         """Apply deterministic Planner/Judge fixture rules until quiescent."""
 
@@ -376,6 +379,7 @@ class NetworkFixtureRunner:
 
     def run(self, *, max_time: int = 2000) -> NetworkPreflightResult:
         self._bootstrap()
+        self.observe_epoch(0.0)
         completion_time = 0
         for current_time in range(max_time):
             self.simulator.time = current_time
@@ -391,6 +395,7 @@ class NetworkFixtureRunner:
                 self.processed_flows.add(flow_id)
             self._react(event_time)
             self.bridge.dispatch_ready(0, timestamp=event_time)
+            self.observe_epoch(event_time)
             if self.policy_complete and not self.simulator.active_flows():
                 completion_time = current_time + 1
                 self.engine.finalize_workflow(0, timestamp=event_time)
@@ -486,4 +491,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -207,9 +207,9 @@ Collector v1.1 已与动态 DAG 执行器和固定模板 adapter 同时集成，
 
 - 决定 Planner 何时增加步骤
 - 决定 Judge 何时剪枝
-- 计算 `Pcrit` 或 `Score(f)`
 - 影响 Traffic Classifier、Guard 或 QoS
 
 当前 v1.1 preflight 的 12 个组合均为 0 validation error、0 replay error 和 0 snapshot
-mismatch。下一步应在稳定的 v1.1 active DAG 上实现 shadow-mode `Pcrit/Score`；只有外部
-日志明确包含 parents 或动态事件时，才映射成真实 trace-driven DAG。
+mismatch。Pcrit/Score shadow v1 已作为 Collector 的独立消费者实现，详见
+`PCRIT_SCORE.md`；只有外部日志明确包含 parents 或动态事件时，才映射成真实
+trace-driven DAG。

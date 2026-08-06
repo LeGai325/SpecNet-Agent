@@ -42,6 +42,11 @@
   依赖、Flow 双向绑定、失败重试、Judge 采用、optional 子图安全剪枝和 active graph
   snapshot。RAG 补检索、Coding Retry、Judge Pruning、Parallel Join 四类确定性 fixture
   已通过现有 Flow/网络调度器的三档容量 preflight，Collector 校验错误为 0。
+- 新增默认关闭的 Pcrit/Score shadow scorer v1：按论文公式组合 DAG position、连续 Slack、
+  完成 workflow 的平滑历史采用率、CostDelay、remaining size、active fanout、Age 和
+  SpecPenalty；逐 component 输出且不影响 Policy、Controller、Guard 或 reward。四类动态
+  fixture、三档容量、四个敏感性 profile 共 48 个组合通过，off/shadow 精确等价，全套
+  99 项测试通过。
 
 ## 当前默认配置
 
@@ -52,6 +57,8 @@
   preflight 中稳定超过 v2。
 - 稳定训练推荐使用 90 episodes、线性 epsilon 衰减、visit-decay learning rate、
   30/45/60/75/90 checkpoints 和独立 validation 选择。
+- Pcrit/Score 默认 `off`；仅诊断时使用 `--criticality-scoring shadow`，默认 profile 为
+  `balanced`、score epoch 为 5，默认只记录 learned SpecNet policy。
 
 ## 尚未完成或仍为代理实现
 
@@ -71,8 +78,10 @@
   不同 agent 的 timing 覆盖不一致。正式实验表明 source/Slack/负载覆盖合理且训练稳定，
   但性能差异包含 required/optional work 映射变化，不能描述为 Controller 算法提升。
 - 动态 DAG 执行器尚未替换默认固定 workflow，也没有真实语义 Planner/Judge 或包含完整
-  parents/retry/pruning 的外部 trace；当前四类场景是确定性功能 fixture。Collector 本身
-  仍不计算 `Pcrit/Score`，也不改变 Controller 或调度决策。
+  parents/retry/pruning 的外部 trace；当前四类场景是确定性功能 fixture。Pcrit/Score 已能
+  shadow 计算，但尚未映射 Traffic Class 或改变 Controller/调度决策。
+- 固定 workflow adapter 按实际创建时机逐步暴露 DAG，早期 flow 看不到尚未创建的未来
+  节点；历史采用率目前只在单个 run 内从 Beta(1,1) 冷启动。
 
 ## 合并时的约束
 
@@ -84,8 +93,9 @@
 
 ## 下一步
 
-1. 在 Collector v1.1 active DAG replay 上实现 shadow-mode `Pcrit/Score`。
-2. 用四类确定性动态 fixture 验证关键性排序和未来标签隔离。
+1. 在包含真实 parents/retry/pruning 的 Agent trace 上校准 Pcrit/CostDelay，并确定冻结
+   历史或在线历史的实验协议。
+2. 单独设计 Score 到 Traffic Class 的映射，不在同一提交中直接修改真实 QoS queue。
 3. 仅对明确包含 parents/retry/pruning 的 Agent trace 增加动态 workload adapter。
 4. 合并真实 QoS queue、源端 fanout/speculation control 和新的
    speculative-pressure 信号。

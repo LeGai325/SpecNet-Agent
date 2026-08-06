@@ -187,6 +187,7 @@ event 全部有原因。JSONL 从 131,024 增至 135,179 bytes，增加约 3.2%�
 - 现有大规模 RL 实验仍默认使用固定 workflow；尚未把随机/trace workload 改造成包含真实
   parents、retry 和 pruning 的动态 workload。
 - fixture rule 不是语义 Planner/Judge，不能用于宣称真实 Agent Runtime 收益。
-- 当前不计算 `Pcrit/Score(f)`，也不改变 QoS queue、Guard 或 Controller action。
+- Pcrit/Score shadow v1 已能读取当前 snapshot 并评分，但不改变 QoS queue、Guard 或
+  Controller action；详见 `PCRIT_SCORE.md`。
 
-下一步是在 Collector v1.1 的 active DAG replay 上实现 shadow-mode `Pcrit/Score`。
+下一步是在包含真实动态图事件的 trace 上校准评分，再单独设计 Traffic Class 映射。

@@ -58,6 +58,13 @@ DAG 的创建、解锁、失败重试和 Judge 剪枝由独立 `dynamic_dag.py` 
 但默认实验仍保留固定 workflow。Collector 详细契约见 `docs/WORKFLOW_HINT_COLLECTOR.md`，
 执行器说明见 `docs/DYNAMIC_DAG.md`。
 
+### Pcrit / Score Shadow Scorer
+
+可选 `--criticality-scoring shadow` 从当前 Collector/DAG snapshot、连续 Slack 和已经完成
+workflow 的平滑 Judge 采用历史计算逐 flow Pcrit/Score。评分器输出所有 component 和
+`affects_policy=false`，不会进入 `Policy.flow_weight()`、Controller state、Guard 或 reward。
+默认 `off` 不创建 scorer/history，也不增加输出。实现和边界见 `docs/PCRIT_SCORE.md`。
+
 ### Dynamic DAG Runtime
 
 `DynamicDAGEngine` 维护 `StepSpec`、`StepRuntime`、parent/child 索引、ready queue、
