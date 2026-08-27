@@ -29,6 +29,12 @@ specnet_plotting/plotting_multi/figures_quality_balance*/
 specnet_plotting/plotting_multi/figures_modified_networks*/
 specnet_plotting/plotting_multi/figures_quality_balance_bandit_guard*/
 
+# Personal research workspace generated artifacts
+student15267/external_agent_data/
+student15267/specnet_proofs/results/
+student15267/specnet_proofs/data_profiles/
+student15267/specnet_proofs/trace_upstream_snapshot/
+
 # Local editor files
 .vscode/
 .idea/
