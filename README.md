@@ -174,6 +174,20 @@ checksum 校验的 V1/V2/V3 冻结 profile。
 
 ## 当前状态与已知限制
 
+Pcrit/Score shadow scorer 默认关闭。需要检查逐 flow 关键性时可运行：
+
+```bash
+python3 specnet_agent_experiments/specnet_agent_experiment.py \
+  --criticality-scoring shadow \
+  --criticality-profile balanced \
+  --criticality-policies specnet_agent \
+  --output-dir outputs/criticality_shadow
+```
+
+它只生成 `criticality_scores.jsonl`、`criticality_summary.json` 和 model metadata，不会改变
+调度、Controller、Guard、reward 或 Q-table。公式、preflight 和限制见
+[`docs/PCRIT_SCORE.md`](docs/PCRIT_SCORE.md)。
+
 - 训练已经支持 epsilon 衰减、按访问次数衰减学习率，以及独立 validation checkpoint
   选择。
 - `no_source_control` 当前由 `critical_path_only` 代理，不是严格的单开关消融。

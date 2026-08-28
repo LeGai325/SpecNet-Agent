@@ -1,6 +1,6 @@
 # 当前项目状态
 
-更新时间：2026-08-01
+更新时间：2026-08-06
 
 ## 已实现
 
@@ -35,6 +35,20 @@
   入口 smoke；30-episode paired preflight 与 5-seed、90-episode、10-run 的 V2 vs V3
   正式配对实验均已通过，Trace Commons 仅作校验，VTCode 与 Exgentic 不进入真实 workload。
 - 渐进式 speculation admission、运行中追加与停止 branch 仍明确延期。
+- 新增默认关闭的 Workflow Hint Collector v1.1：记录内容无关的 step/DAG hints、
+  动态生命周期、三类依赖、失败重试、Judge 采用及结构化 event reason；提供 JSONL/summary、
+  v1.0 兼容 active DAG replay、结构化 diagnostics、隐私字段边界和 on/off 等价回归。
+- 新增独立动态 DAG 执行器 v1：支持在线 add-step、hard dependency 解锁、optional/control
+  依赖、Flow 双向绑定、失败重试、Judge 采用、optional 子图安全剪枝和 active graph
+  snapshot。RAG 补检索、Coding Retry、Judge Pruning、Parallel Join 四类确定性 fixture
+  已通过现有 Flow/网络调度器的三档容量 preflight，Collector 校验错误为 0。
+- 新增默认关闭的 Pcrit/Score shadow scorer v1：按论文公式组合 DAG position、连续 Slack、
+  完成 workflow 的平滑历史采用率、CostDelay、remaining size、active fanout、Age 和
+  SpecPenalty；逐 component 输出且不影响 Policy、Controller、Guard 或 reward。四类动态
+  fixture、三档容量、四个敏感性 profile 共 48 个组合通过，off/shadow 精确等价，全套
+  127 项测试通过。
+- 数据 V3 合并后的 Collector + Pcrit off/shadow 联合 smoke 已通过：10 个既有输出逐字节
+  一致，shadow 在三档负载覆盖 782 条 flow、生成 13,168 条有限评分记录。
 
 ## 当前默认配置
 
@@ -45,6 +59,8 @@
   preflight 中稳定超过 v2。
 - 稳定训练推荐使用 90 episodes、线性 epsilon 衰减、visit-decay learning rate、
   30/45/60/75/90 checkpoints 和独立 validation 选择。
+- Pcrit/Score 默认 `off`；仅诊断时使用 `--criticality-scoring shadow`，默认 profile 为
+  `balanced`、score epoch 为 5，默认只记录 learned SpecNet policy。
 
 ## 尚未完成或仍为代理实现
 
@@ -63,6 +79,11 @@
 - `trace_driven_v3_candidate` 同样使用固定模板；SWE-chat 不提供真实 deadline/network，
   不同 agent 的 timing 覆盖不一致。正式实验表明 source/Slack/负载覆盖合理且训练稳定，
   但性能差异包含 required/optional work 映射变化，不能描述为 Controller 算法提升。
+- 动态 DAG 执行器尚未替换默认固定 workflow，也没有真实语义 Planner/Judge 或包含完整
+  parents/retry/pruning 的外部 trace；当前四类场景是确定性功能 fixture。Pcrit/Score 已能
+  shadow 计算，但尚未映射 Traffic Class 或改变 Controller/调度决策。
+- 固定 workflow adapter 按实际创建时机逐步暴露 DAG，早期 flow 看不到尚未创建的未来
+  节点；历史采用率目前只在单个 run 内从 Beta(1,1) 冷启动。
 
 ## 合并时的约束
 
@@ -74,12 +95,15 @@
 
 ## 下一步
 
-1. 合并真实 QoS queue 实现。
-2. 合并真实源端 fanout/speculation control。
-3. 合并新的 speculative-pressure 信号。
-4. 在相同 reward、action 和 workload 下重新运行 Controller ablation。
-5. 在独立 PR 中评估 path-aware congestion 与 Slack，避免与本次调度改动混合。
-6. 动态 DAG 等模块就绪后，再设计 V2-B 和 tau3 外部 benchmark runner。
-7. 将 V3 candidate 作为当前首选公开 trace-driven workload 候选，V2 保留为历史回归；
+1. 在包含真实 parents/retry/pruning 的 Agent trace 上校准 Pcrit/CostDelay，并确定冻结
+   历史或在线历史的实验协议。
+2. 单独设计 Score 到 Traffic Class 的映射，不在同一提交中直接修改真实 QoS queue。
+3. 仅对明确包含 parents/retry/pruning 的 Agent trace 增加动态 workload adapter。
+4. 合并真实 QoS queue、源端 fanout/speculation control 和新的
+   speculative-pressure 信号。
+5. 在相同 reward、action 和 workload 下重新运行 Controller ablation。
+6. 在独立 PR 中评估 path-aware congestion 与 Slack，避免与本次调度改动混合。
+7. 动态 DAG 等模块就绪后，再设计 V2-B 和 tau3 外部 benchmark runner。
+8. 将 V3 candidate 作为当前首选公开 trace-driven workload 候选，V2 保留为历史回归；
    新 QoS、源端控制和 speculative-pressure 模块合并后，在两种 profile 上做最小回归，正式
    Controller 结论优先报告 V3，并明确固定模板和缺少真实 network/deadline 的边界。

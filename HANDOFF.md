@@ -1,6 +1,24 @@
 # HANDOFF
 
-更新时间：2026-08-01
+更新时间：2026-08-06
+
+## Pcrit / Score shadow v1 收尾
+
+- Workflow Hint Collector v1、动态 DAG v1、Collector v1.1 和 Pcrit/Score shadow v1 已按
+  依赖顺序重放到包含数据 PR #3 的最新主线；Pcrit 功能 checkpoint 为 `e99e748`。
+- Pcrit 按 DAG position、连续 Slack 和完成 workflow 的平滑历史采用率计算，并按论文公式
+  组合 CostDelay、remaining size、fanout、Age 和 SpecPenalty；所有未公开选择均可配置并
+  写入 metadata。
+- shadow 默认关闭，启用后只增加评分记录，不进入 Policy、Controller、Guard、reward 或
+  Q-table；四个 profile、四类动态 fixture、三档容量共 48 个 preflight 组合通过。
+- 合并后的实验模块全套 127 项测试通过。冻结 V3 的 off/shadow 联合 smoke 中，10 个既有
+  输出文件逐字节一致；shadow 覆盖 782 条 flow、生成 13,168 条有限评分记录。
+- 本阶段已经完成“可解释、无未来标签泄漏、可与 V3 联合运行”的 shadow scorer；尚未做
+  Score 到 Traffic Class 的映射，也没有接入 Q0-Q3 或真实 QoS，因此不能声称端到端性能
+  收益。
+- 下一步决策点是：先做独立 Traffic Classifier shadow，或在课题组已有 QoS 模块可用时
+  直接设计接口；在获得真实 parents/retry/pruning 和 Judge selection 日志前，不继续为了
+  数值好看调整 Pcrit 权重。
 
 ## 本阶段结论
 

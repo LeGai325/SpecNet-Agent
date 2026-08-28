@@ -42,6 +42,41 @@ TraceLab 与 SWE-chat。SWE-chat 先按 content hash 去重，再按 repo-user �
 只使用清洗后可配对的 tool interval，不把原始 session duration 当连续服务时间。V3 仍是
 固定模板候选，不是动态 DAG 回放。
 
+### Workflow Hint Collector
+
+可选 `--workflow-hints record` 在 evaluation 中以 shadow mode 记录 workflow DAG
+元数据。Collector 位于 `specnet_agent_experiments/workflow_hints.py`，v1.1 记录
+`workflow_id`、`step_id`、parents、依赖类型、request type、deadline、size、
+speculation level 及 created/ready/started/completed/failed/retried/cancelled/selected
+事件，并为 failed/retried/cancelled 提供结构化 reason。默认 `off` 不实例化 Collector，
+也不改变历史输出。`workflow_hint_replay.py` 兼容读取 v1.0/v1.1，并重建 active DAG。
+
+当前 adapter 将固定 `Planner -> Branches -> LLM -> Judge` 结构转换为 hints，且明确
+标记 `fixed_template_adapter`。Collector API 可以记录运行中新增和剪枝事件，但动态
+DAG 的创建、解锁、失败重试和 Judge 剪枝由独立 `dynamic_dag.py` runtime 执行器负责。
+当前执行器已经通过四类确定性 fixture 和现有网络 Flow 调度器的三档容量 preflight，
+但默认实验仍保留固定 workflow。Collector 详细契约见 `docs/WORKFLOW_HINT_COLLECTOR.md`，
+执行器说明见 `docs/DYNAMIC_DAG.md`。
+
+### Pcrit / Score Shadow Scorer
+
+可选 `--criticality-scoring shadow` 从当前 Collector/DAG snapshot、连续 Slack 和已经完成
+workflow 的平滑 Judge 采用历史计算逐 flow Pcrit/Score。评分器输出所有 component 和
+`affects_policy=false`，不会进入 `Policy.flow_weight()`、Controller state、Guard 或 reward。
+默认 `off` 不创建 scorer/history，也不增加输出。实现和边界见 `docs/PCRIT_SCORE.md`。
+
+### Dynamic DAG Runtime
+
+`DynamicDAGEngine` 维护 `StepSpec`、`StepRuntime`、parent/child 索引、ready queue、
+attempt 和 graph version。hard parents 完成后自动解锁 child；optional evidence 与
+control trigger 只记录语义，不阻塞执行。`DynamicDAGFlowBridge` 将 ready step 映射到
+外部 Flow，并把 Flow 完成、失败或取消反向同步到 DAG。
+
+Planner/Judge policy 与 DAG Engine 解耦。当前 RAG supplemental、Coding retry、Judge
+pruning 和 Parallel join 都是确定性功能 fixture，不读取 prompt 或响应内容，也不作为
+真实 Agent benchmark。默认固定状态机没有被替换，避免在缺少真实动态图数据时改变历史
+实验语义。
+
 ## Policy 和 Controller
 
 `Policy` 是所有策略的基类，主要扩展点是：
@@ -195,5 +230,9 @@ quality 最高的动作并记录 `quality_constraint_infeasible`。实际完成�
 - `test_training_stability.py`：训练 schedule、checkpoint 和 validation 配置。
 - `test_slack_calibration.py`：离线 calibration 分组和 role-aware 估算。
 - `test_multi_path.py`：路径映射、容量隔离、调度权重、默认兼容性和输出契约。
+- `test_dynamic_dag.py`：在线增长、依赖解锁、Flow bridge、retry、剪枝、四类 fixture 和
+  三档容量 preflight。
+- `test_workflow_hint_replay.py`：v1.0 兼容读取、active DAG 回放、reason、diagnostics 和
+  Engine snapshot 对照。
 
 新增模块至少应包含一个针对新行为的测试，以及一个确认旧默认行为不变的回归测试。
